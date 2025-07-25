@@ -1,0 +1,3337 @@
+<Warning>
+  All endpoints use HTTPS. HTTP is not supported. API keys that call the API
+  over HTTP may be subject to automatic rotation.
+</Warning>
+
+All API requests use the following base URL: `https://api.cartesia.ai`. (For WebSockets the corresponding protocol is `wss://`.)
+
+### Always send a `Cartesia-Version` header
+
+Each request you send our API should have a `Cartesia-Version` header containing the date (`YYYY-MM-DD`) when you tested your integration. For WebSockets, you can alternately use the `?cartesia_version` query parameter, which will take precedence.
+
+This will help us provide you with timely deprecation notices and enable us to provide automatic backwards compatibility where possible.
+
+For a given `Cartesia-Version`, we will preserve existing input and output fields, but we may make non-breaking changes, such as:
+
+1. Add optional request fields.
+2. Add additional response fields.
+3. Change conditions for specific error types
+4. Add variants to enum-like output values.
+
+Our versioning scheme is inspired by the [Anthropic API](https://docs.anthropic.com/en/api/versioning).
+
+### Use API keys to authenticate
+
+Authentication is handled using API keys. You can create a new API key from [play.cartesia.ai/keys](https://play.cartesia.ai/keys).
+
+Client apps making Cartesia API requests should use Access Tokens, to avoid exposing your API Key. Your server generates an Access Token and sends it to your client, which in turn includes `Authorization: Bearer <access_token>` in the HTTP headers of Cartesia API requests.
+Read the full documentation for this at [Access Token API Reference](/api-reference/auth/access-token) for more info.
+
+For WebSocket connections, authenticate by passing in the field `?api_key=<your_api_key>` when creating the WebSocket connection from the server, and passing in `?access_token=<access_token>` when creating from the client.
+
+### Check response codes
+
+Our API uses standard HTTP response codes; refer to [httpstatuses.io](https://httpstatuses.io).
+
+### Pass data according to the method
+
+All GET requests use query parameters to pass data. All POST requests use a JSON body or `multipart/form-data`.
+
+
+---
+title: Concurrency and WebSocket Limits
+subtitle: Learn about concurrency limits and timeouts with the Cartesia API.
+---
+
+Your account is subject to two types of rate limits: WebSocket limits and generation concurrency limits.
+
+## Concurrency limits by subscription plan
+
+Your subscription plan determines how many requests can be processed simultaneously. Sonic Text-to-Speech (TTS) and Ink Speech-to-Text (STT) each have separate concurrency limits with the same values per plan.
+
+| Plan | TTS Concurrent Requests | STT Concurrent Requests |
+|------|------------------------|------------------------|
+| Free | 2 | 8 |
+| Pro | 3 | 12 |
+| Startup | 5 | 20 |
+| Scale | 15 | 60 |
+| Enterprise | Custom | Custom |
+
+<Note>
+  Sonic (Text-to-Speech) and Ink (Speech-to-Text) services have separate concurrent request limits. For example, if you're on the Scale plan, you can have up to 15 concurrent TTS requests AND 60 concurrent STT requests running simultaneously.
+</Note>
+
+## Text-to-Speech (TTS) Concurrency
+
+We measure TTS generation concurrency in terms of the number of unique contexts active at a given time.
+
+- For HTTP endpoints, each request is treated as a separate context and counts toward your concurrency limit. 
+- For WebSockets, a unique <code>context_id</code> defines a context—sending additional requests with the same <code>context_id</code> does not increase your concurrency usage. This is because requests to the same context are processed sequentially.
+
+If you exceed your TTS concurrency limit, you will receive a `429 Too Many Requests` error. You can check your concurrency limit and upgrade it on the playground at [play.cartesia.ai](https://play.cartesia.ai).
+
+### Interpreting concurrency limits
+
+How you interpret your TTS concurrency limit depends on how you're using the Sonic model family.
+
+<AccordionGroup>
+  <Accordion title="Conversational use cases">
+    For real-time conversational use cases, such as powering voice agents, we've found that the number of parallel conversations you can support is effectively 4X your concurrency limit. This is just a rule of thumb, and depends on the types of conversations you're supporting. You can reach out to us to discuss your specific use case.
+
+    For example, if you have a TTS concurrency limit of 15, you can typically support 60 parallel conversations.
+
+  </Accordion>
+  <Accordion title="Non-conversational use cases">
+
+    For non-conversational use cases, such as generating speech in batch jobs, there is a more direct relationship between your concurrency limit and the number of parallel generations you can support.
+
+    For example, if you have a TTS concurrency limit of 15, you can typically support 15 parallel TTS generations. You can use a connection pool to ensure you don't exceed your concurrency limit.
+
+  </Accordion>
+</AccordionGroup>
+
+### WebSocket limits
+
+<Tip> You don't need to worry about WebSocket limits if you're only using the HTTP API. </Tip>
+
+We limit the number of parallel WebSocket connections to 10X your concurrency limit. For example, if you have a concurrency limit of 15, you can have up to 150 parallel WebSocket connections.
+
+If you exceed your WebSocket limit, you will receive a `429 Too Many Requests` error on trying to open a new WebSocket connection.
+
+Usually, when users run into WebSocket limits (even at scale), it's because they're not properly closing idle connections. Beyond closing idle connections, you can also create a connection pool to ensure you don't exceed your WebSocket limit.
+
+#### WebSocket timeouts
+
+We close idle WebSocket connections after 5 minutes. We recommend closing and re-opening a new websocket connection when connections stay idle longer than 5 minutes.
+
+## Speech-to-Text (STT) Concurrency
+
+Each active transcription stream counts as one concurrent request, regardless of whether you're using HTTP or WebSocket connections.
+
+- One stream equals one HTTP or WebSocket connection
+- Each concurrent transcription counts toward your STT concurrency limit
+
+If you exceed your STT concurrency limit, you will receive a `429 Too Many Requests` error.
+
+
+
+API Status
+API Status and Version
+GET
+https://api.cartesia.ai/
+GET
+/
+
+TypeScript
+
+import { CartesiaClient } from "@cartesia/cartesia-js";
+const client = new CartesiaClient({ apiKey: "YOUR_API_KEY" });
+await client.apiStatus.get();
+Try it
+200
+API Status and Version
+
+{
+  "ok": true,
+  "version": "2025-04-16"
+}
+Headers
+Cartesia-Version
+"2025-04-16"
+Required
+Response
+This endpoint returns an object.
+ok
+boolean
+version
+string
+Was this page helpful?
+Yes
+No
+Previous
+Compare TTS Endpoints
+Learn which TTS endpoint to use for your use case.
+Next
+Built with
+
+
+---
+title: Compare TTS Endpoints
+subtitle: Learn which TTS endpoint to use for your use case.
+---
+
+### If you want to generate speech in real-time
+
+We recommend using our WebSocket endpoint for real-time applications for a few reasons:
+
+1. **Latency**: You can establish a WebSocket connection in advance, which means that you do not incur any connection latency when you start generating speech. (This usually saves you about 200ms.)
+2. **Input Streaming**: You can stream in inputs while maintaining the prosody of the generated speech, which is useful when generating text inputs in real-time, such as with an LLM.
+3. **Timestamps**: You can get timestamped transcripts for the generated speech to build features like subtitles or live transcripts. (For the `sonic` model, timestamps are only supported for languages `en`, `de`, `es`, and `fr`. For `sonic-preview`, timestamps are supported for all languages!)
+4. **Multiplexing**: You can multiplex multiple conversations over a single connection.
+
+### If you want to generate speech ahead of time
+
+We recommend using our raw bytes (i.e. audio file) output endpoint, which can give you outputs in a variety of formats, such as WAV and MP3 (in addition to raw PCM audio).
+
+
+
+TTS
+Text to Speech (Bytes)
+
+POST
+https://api.cartesia.ai/tts/bytes
+
+MP3
+
+WAV
+
+RAW
+POST
+/tts/bytes
+
+TypeScript
+
+import { CartesiaClient } from "@cartesia/cartesia-js";
+const client = new CartesiaClient({ apiKey: "YOUR_API_KEY" });
+await client.tts.bytes({
+    modelId: "sonic-2",
+    transcript: "Hello, world!",
+    voice: {
+        mode: "id",
+        id: "694f9389-aac1-45b6-b726-9d9369183238"
+    },
+    language: "en",
+    outputFormat: {
+        container: "mp3",
+        sampleRate: 44100,
+        bitRate: 128000
+    }
+});
+Try it
+Headers
+Authorization
+string
+Required
+Bearer authentication of the form Bearer <token>, where token is your auth token.
+
+Cartesia-Version
+"2025-04-16"
+Required
+Request
+This endpoint expects an object.
+model_id
+string
+Required
+The ID of the model to use for the generation. See Models for available models.
+
+transcript
+string
+Required
+voice
+object
+Required
+
+Show 2 properties
+output_format
+object
+Required
+
+Show 3 variants
+language
+enum
+Optional
+The language that the given voice should speak the transcript in.
+
+Options: English (en), French (fr), German (de), Spanish (es), Portuguese (pt), Chinese (zh), Japanese (ja), Hindi (hi), Italian (it), Korean (ko), Dutch (nl), Polish (pl), Russian (ru), Swedish (sv), Turkish (tr).
+
+
+Show 15 enum values
+duration
+double
+Optional
+The maximum duration of the audio in seconds. You do not usually need to specify this. If the duration is not appropriate for the length of the transcript, the output audio may be truncated.
+speed
+enum
+Optional
+This feature is experimental and may not work for all voices.
+
+Speed setting for the model. Defaults to normal.
+
+Influences the speed of the generated speech. Faster speeds may reduce hallucination rate.
+
+Allowed values:
+slow
+normal
+fast
+save
+boolean
+Optional
+Whether to save the generated audio file. When true, the response will include a Cartesia-File-ID header.
+
+Response
+This endpoint returns a file.
+
+
+TTS
+Text to Speech (SSE)
+
+POST
+https://api.cartesia.ai/tts/sse
+POST
+/tts/sse
+
+TypeScript
+
+import { CartesiaClient } from "@cartesia/cartesia-js";
+const client = new CartesiaClient({ apiKey: "YOUR_API_KEY" });
+const response = await client.tts.sse({
+    modelId: "sonic-2",
+    transcript: "Hello, world!",
+    voice: {
+        mode: "id",
+        id: "694f9389-aac1-45b6-b726-9d9369183238"
+    },
+    language: "en",
+    outputFormat: {
+        container: "raw",
+        sampleRate: 44100,
+        encoding: "pcm_f32le"
+    }
+});
+for await (const item of response) {
+    console.log(item);
+}
+Try it
+Headers
+Authorization
+string
+Required
+Bearer authentication of the form Bearer <token>, where token is your auth token.
+
+Cartesia-Version
+"2025-04-16"
+Required
+Request
+This endpoint expects an object.
+model_id
+string
+Required
+The ID of the model to use for the generation. See Models for available models.
+
+transcript
+string
+Required
+voice
+object
+Required
+
+Hide 2 properties
+mode
+"id"
+Required
+id
+string
+Required
+The ID of the voice.
+output_format
+object
+Required
+
+Hide 3 properties
+container
+"raw"
+Required
+encoding
+enum
+Required
+Allowed values:
+pcm_f32le
+pcm_s16le
+pcm_mulaw
+pcm_alaw
+sample_rate
+integer
+Required
+language
+enum
+Optional
+The language that the given voice should speak the transcript in.
+
+Options: English (en), French (fr), German (de), Spanish (es), Portuguese (pt), Chinese (zh), Japanese (ja), Hindi (hi), Italian (it), Korean (ko), Dutch (nl), Polish (pl), Russian (ru), Swedish (sv), Turkish (tr).
+
+
+Search...
+
+en
+fr
+de
+es
+pt
+zh
+ja
+hi
+it
+ko
+nl
+pl
+ru
+sv
+tr
+duration
+double
+Optional
+The maximum duration of the audio in seconds. You do not usually need to specify this. If the duration is not appropriate for the length of the transcript, the output audio may be truncated.
+speed
+enum
+Optional
+This feature is experimental and may not work for all voices.
+
+Speed setting for the model. Defaults to normal.
+
+Influences the speed of the generated speech. Faster speeds may reduce hallucination rate.
+
+Allowed values:
+slow
+normal
+fast
+add_timestamps
+boolean
+Optional
+Whether to return word-level timestamps. If false (default), no word timestamps will be produced at all. If true, the server will return timestamp events containing word-level timing information.
+
+add_phoneme_timestamps
+boolean
+Optional
+Whether to return phoneme-level timestamps. If false (default), no phoneme timestamps will be produced. If true, the server will return timestamp events containing phoneme-level timing information.
+
+use_normalized_timestamps
+boolean
+Optional
+Whether to use normalized timestamps (True) or original timestamps (False).
+
+context_id
+string
+Optional
+Optional context ID for this request.
+Response
+This endpoint returns a stream of object.
+chunk
+object
+
+Hide 6 properties
+type
+"chunk"
+data
+Base64 string
+done
+boolean
+status_code
+integer
+step_time
+double
+context_id
+string or null
+A unique identifier for the context. You can use any unique identifier, like a UUID or human ID.
+
+Some customers use unique identifiers from their own systems (such as conversation IDs) as context IDs.
+
+OR
+flush_done
+object
+
+Hide 6 properties
+type
+"flush_done"
+done
+boolean
+flush_done
+boolean
+flush_id
+integer
+An identifier corresponding to the number of flush commands that have been sent for this context. Starts at 1. This can be used to map chunks of audio to certain transcript submissions.
+status_code
+integer
+context_id
+string or null
+A unique identifier for the context. You can use any unique identifier, like a UUID or human ID.
+
+Some customers use unique identifiers from their own systems (such as conversation IDs) as context IDs.
+
+OR
+done
+object
+
+Hide 4 properties
+type
+"done"
+done
+boolean
+status_code
+integer
+context_id
+string or null
+A unique identifier for the context. You can use any unique identifier, like a UUID or human ID.
+
+Some customers use unique identifiers from their own systems (such as conversation IDs) as context IDs.
+
+OR
+timestamps
+object
+
+Hide 5 properties
+type
+"timestamps"
+done
+boolean
+status_code
+integer
+context_id
+string or null
+A unique identifier for the context. You can use any unique identifier, like a UUID or human ID.
+
+Some customers use unique identifiers from their own systems (such as conversation IDs) as context IDs.
+
+word_timestamps
+object or null
+
+Show 3 properties
+OR
+error
+object
+
+Hide 5 properties
+type
+"error"
+done
+boolean
+error
+string
+status_code
+integer
+context_id
+string or null
+A unique identifier for the context. You can use any unique identifier, like a UUID or human ID.
+
+Some customers use unique identifiers from their own systems (such as conversation IDs) as context IDs.
+
+OR
+phoneme_timestamps
+object
+
+Hide 5 properties
+type
+"phoneme_timestamps"
+done
+boolean
+status_code
+integer
+context_id
+string or null
+A unique identifier for the context. You can use any unique identifier, like a UUID or human ID.
+
+Some customers use unique identifiers from their own systems (such as conversation IDs) as context IDs.
+
+phoneme_timestamps
+object or null
+
+Hide 3 properties
+phonemes
+list of strings
+start
+list of doubles
+end
+list of doubles
+
+
+TTS
+Text to Speech (WebSocket)
+
+WSS
+wss://api.cartesia.ai/tts/websocket
+Handshake
+URL	wss://api.cartesia.ai/tts/websocket
+Method	GET
+Status	101 Switching Protocols
+Try it
+Messages
+
+{"model_id":"sonic-2","transcript":"Hello, world! I'm generating audio on ","voice":{"mode":"id","id":"a0e99841-438c-4a64-b679-ae501e7d6091"},"language":"en","context_id":"happy-monkeys-fly","output_format":{"container":"raw","encoding":"pcm_s16le","sample_rate":8000},"add_timestamps":true,"continue":true}
+Send
+
+
+{"model_id":"sonic-2","transcript":"Cartesia! Look, we did a continuation of the previous generation!","voice":{"mode":"id","id":"a0e99841-438c-4a64-b679-ae501e7d6091"},"language":"en","context_id":"happy-monkeys-fly","output_format":{"container":"raw","encoding":"pcm_s16le","sample_rate":8000},"add_timestamps":true,"continue":false}
+Send
+
+
+{"type":"chunk","data":"aSDinaTvuI8gbWludGxpZnk=","done":false,"status_code":206,"step_time":123,"context_id":"happy-monkeys-fly"}
+Receive
+
+
+{"type":"chunk","data":"aSDinaTvuI8gbWludGxpZnk=","done":false,"status_code":206,"step_time":123,"context_id":"happy-monkeys-fly"}
+Receive
+
+
+{"type":"timestamps","done":false,"status_code":206,"context_id":"happy-monkeys-fly","word_timestamps":{"words":["Hello"],"start":[0],"end":[1]}}
+Receive
+
+
+{"context_id":"happy-monkeys-fly","cancel":true}
+Send
+
+
+{"type":"done","done":true,"status_code":206,"context_id":"happy-monkeys-fly"}
+Receive
+
+This endpoint creates a bidirectional WebSocket connection. The connection supports multiplexing, so you can send multiple requests and receive the corresponding responses in parallel.
+
+The WebSocket API is built around contexts:
+
+When you send a generation request, you pass a context_id. Further inputs on the same context_id will continue the generation, maintaining prosody.
+Responses for a context contain the context_id you passed in so that you can match requests and responses.
+Read the guide on working with contexts to learn more.
+
+For the best performance, we recommend the following usage pattern:
+
+Do many generations over a single WebSocket. Just use a separate context for each generation. The WebSocket scales up to dozens of concurrent generations.
+Set up the WebSocket before the first generation. This ensures you don’t incur latency when you start generating speech.
+Include necessary spaces and punctuation: This allows Sonic to generate speech more accurately and with better prosody.
+Use max_buffer_delay_ms to let the model intelligently manage buffering up to the specified maximum delay.
+For conversational agent use cases, we recommend the following usage pattern:
+
+Each turn in a conversation should correspond to a context: For example, if you are using Sonic to power a voice agent, each turn in the conversation should be a new context.
+Start a new context for interruptions: If the user interrupts the agent, start a new context for the agent’s response.
+To learn more about managing concurrent generations and WebSocket connection limits, see the concurrency limits and timeouts page.
+
+Handshake
+WSS
+wss://api.cartesia.ai/tts/websocket
+
+Headers
+Cartesia-Version
+"2025-04-16"
+Required
+Query parameters
+cartesia_version
+string
+Required
+You can specify this instead of the Cartesia-Version header. This is particularly useful for use in the browser, where WebSockets do not support headers.
+
+You do not need to specify this if you are passing the header.
+
+api_key
+string
+Required
+You can specify this instead of the X-API-Key header. This is particularly useful for use in the browser, where WebSockets do not support headers.
+
+You do not need to specify this if you are passing the header.
+
+Send
+object
+Required
+Use this to generate speech for a transcript.
+
+Hide 14 properties
+model_id
+string
+Required
+The ID of the model to use for the generation. See Models for available models.
+
+transcript
+string
+Required
+The transcript to generate speech for.
+voice
+object
+Required
+
+Hide 2 properties
+mode
+"id"
+Required
+id
+string
+Required
+The ID of the voice.
+output_format
+object
+Required
+
+Hide 3 properties
+container
+"raw"
+Required
+encoding
+enum
+Required
+Allowed values:
+pcm_f32le
+pcm_s16le
+pcm_mulaw
+pcm_alaw
+sample_rate
+integer
+Required
+language
+enum
+Optional
+The language that the given voice should speak the transcript in.
+
+Options: English (en), French (fr), German (de), Spanish (es), Portuguese (pt), Chinese (zh), Japanese (ja), Hindi (hi), Italian (it), Korean (ko), Dutch (nl), Polish (pl), Russian (ru), Swedish (sv), Turkish (tr).
+
+
+Search...
+
+en
+fr
+de
+es
+pt
+zh
+ja
+hi
+it
+ko
+nl
+pl
+ru
+sv
+tr
+duration
+double
+Optional
+The maximum duration of the audio in seconds. You do not usually need to specify this. If the duration is not appropriate for the length of the transcript, the output audio may be truncated.
+speed
+enum
+Optional
+This feature is experimental and may not work for all voices.
+
+Speed setting for the model. Defaults to normal.
+
+Influences the speed of the generated speech. Faster speeds may reduce hallucination rate.
+
+Allowed values:
+slow
+normal
+fast
+context_id
+string
+Optional
+A unique identifier for the context. You can use any unique identifier, like a UUID or human ID.
+
+Some customers use unique identifiers from their own systems (such as conversation IDs) as context IDs.
+
+continue
+boolean
+Optional
+Whether this input may be followed by more inputs. If not specified, this defaults to false.
+
+max_buffer_delay_ms
+integer
+Optional
+The maximum time in milliseconds to buffer text before starting generation. Values between [0, 1000]ms are supported. Defaults to 0 (no buffering).
+
+When set, the model will buffer incoming text chunks until it’s confident it has enough context to generate high-quality speech, or the buffer delay elapses, whichever comes first. Without this option set, the model will kick off generations immediately, ceding control of buffering to the user.
+
+Use this to balance responsiveness with higher quality speech generation, which often benefits from having more context.
+
+flush
+boolean
+Optional
+Whether to flush the context.
+add_timestamps
+boolean
+Optional
+Whether to return word-level timestamps. If false (default), no word timestamps will be produced at all. If true, the server will return timestamp events containing word-level timing information.
+
+add_phoneme_timestamps
+boolean
+Optional
+Whether to return phoneme-level timestamps. If false (default), no phoneme timestamps will be produced. If true, the server will return timestamp events containing phoneme-level timing information.
+
+use_normalized_timestamps
+boolean
+Optional
+Whether to use normalized timestamps (True) or original timestamps (False).
+
+OR
+object
+Required
+Use this to cancel a context, so that no more messages are generated for that context.
+
+Hide 2 properties
+context_id
+string
+Required
+The ID of the context to cancel.
+cancel
+true
+Required
+Whether to cancel the context, so that no more messages are generated for that context.
+Receive
+Receive
+object
+Required
+The server will send you back a stream of messages with the same context_id as your request. The messages can be of type chunk, timestamps, phoneme_timestamps error, or done.
+
+
+Hide 6 variants
+chunk
+object
+Required
+
+Hide 6 properties
+type
+"chunk"
+Required
+data
+Base64 string
+Required
+done
+boolean
+Required
+status_code
+integer
+Required
+step_time
+double
+Required
+context_id
+string
+Optional
+A unique identifier for the context. You can use any unique identifier, like a UUID or human ID.
+
+Some customers use unique identifiers from their own systems (such as conversation IDs) as context IDs.
+
+OR
+flush_done
+object
+Required
+
+Hide 6 properties
+type
+"flush_done"
+Required
+done
+boolean
+Required
+flush_done
+boolean
+Required
+flush_id
+integer
+Required
+An identifier corresponding to the number of flush commands that have been sent for this context. Starts at 1. This can be used to map chunks of audio to certain transcript submissions.
+status_code
+integer
+Required
+context_id
+string
+Optional
+A unique identifier for the context. You can use any unique identifier, like a UUID or human ID.
+
+Some customers use unique identifiers from their own systems (such as conversation IDs) as context IDs.
+
+OR
+done
+object
+Required
+
+Hide 4 properties
+type
+"done"
+Required
+done
+boolean
+Required
+status_code
+integer
+Required
+context_id
+string
+Optional
+A unique identifier for the context. You can use any unique identifier, like a UUID or human ID.
+
+Some customers use unique identifiers from their own systems (such as conversation IDs) as context IDs.
+
+OR
+timestamps
+object
+Required
+
+Hide 5 properties
+type
+"timestamps"
+Required
+done
+boolean
+Required
+status_code
+integer
+Required
+context_id
+string
+Optional
+A unique identifier for the context. You can use any unique identifier, like a UUID or human ID.
+
+Some customers use unique identifiers from their own systems (such as conversation IDs) as context IDs.
+
+word_timestamps
+object
+Optional
+
+Hide 3 properties
+words
+list of strings
+Required
+start
+list of doubles
+Required
+end
+list of doubles
+Required
+OR
+error
+object
+Required
+
+Hide 5 properties
+type
+"error"
+Required
+done
+boolean
+Required
+error
+string
+Required
+status_code
+integer
+Required
+context_id
+string
+Optional
+A unique identifier for the context. You can use any unique identifier, like a UUID or human ID.
+
+Some customers use unique identifiers from their own systems (such as conversation IDs) as context IDs.
+
+OR
+phoneme_timestamps
+object
+Required
+
+Hide 5 properties
+type
+"phoneme_timestamps"
+Required
+done
+boolean
+Required
+status_code
+integer
+Required
+context_id
+string
+Optional
+A unique identifier for the context. You can use any unique identifier, like a UUID or human ID.
+
+Some customers use unique identifiers from their own systems (such as conversation IDs) as context IDs.
+
+phoneme_timestamps
+object
+Optional
+
+Hide 3 properties
+phonemes
+list of strings
+Required
+start
+list of doubles
+Required
+end
+list of doubles
+Required
+
+---
+title: Contexts
+---
+
+<Info>
+This is a hands-on guide to input streaming using WebSocket contexts. For a conceptual overview of how input streaming works in Sonic, see the [input streaming guide](/build-with-cartesia/capability-guides/stream-inputs-using-continuations).
+</Info>
+
+> In many real time use cases, you don't have your transcripts available upfront—like when you're generating them using an LLM. For these cases, Sonic supports input streaming.
+
+The context IDs you pass to the Cartesia API identify speech contexts. Contexts maintain prosody between their inputs—so you can send a transcript in multiple parts and receive seamless speech in return.
+
+To stream in inputs on a context, just pass a `continue` flag (set to `true`) for every input that you expect will be followed by more inputs. (By default, this flag is set to `false`.)
+
+To finish a context, just set `continue` to `false`. If you do not know the last transcript in advance, you can send an input with an empty transcript and `continue` set to `false`.
+
+<Note>Contexts automatically expire 1 second after the last audio output is streamed out. Attempting to send another input on the same context ID after expiry is not supported.</Note>
+
+<ParamField body="continue" type="boolean" default={false}>
+    Whether this input may be followed by more inputs.
+</ParamField>
+
+### Input Format
+
+1. Inputs on the same context must keep all fields except `transcript`, `continue`, and `duration` the same.
+2. Transcripts are concatenated verbatim, so make sure they form a valid transcript when joined together. Make sure to include any spaces between words or punctuations as necessary. For example, in languages with spaces, you should include a space at the end of the preceding transcript, e.g. transcript 1 is `Thanks for coming, ` and transcript 2 is `it was great to see you.`
+
+### Example
+
+Let's say you're trying to generate speech for "Hello, Sonic! I'm streaming inputs." You should stream in the following inputs (repeated fields omitted for brevity). Note: all other fields (e.g. `model_id`, `language`) are required and should be passed unchanged between requests with input streaming.
+
+```json Input Streaming
+{"transcript": "Hello, Sonic!", "continue": true, "context_id": "happy-monkeys-fly"}
+{"transcript": " I'm streaming ", "continue": true, "context_id": "happy-monkeys-fly"}
+{"transcript": "inputs.", "continue": false, "context_id": "happy-monkeys-fly"}
+```
+
+<Tip>
+If [streaming in input tokens](/build-with-cartesia/capability-guides/stream-inputs-using-continuations), we recommend using `max_buffer_delay_ms`, which sets the maximum time the model will buffer text before starting generation.
+
+Without this option set, the model will start generating immediately on the first request, giving you full control over buffering of inputs.
+</Tip>
+
+If you don't know the last transcript in advance, you can send an input with an empty transcript and `continue` set to `false`:
+
+```json Input Streaming
+{"transcript": "Hello, Sonic!", "continue": true, "context_id": "happy-monkeys-fly"}
+{"transcript": " I'm streaming ", "continue": true, "context_id": "happy-monkeys-fly"}
+{"transcript": "inputs.", "continue": true, "context_id": "happy-monkeys-fly"}
+{"transcript": "", "continue": false, "context_id": "happy-monkeys-fly"}
+```
+
+### Output
+
+You will only receive `done: true` after outputs for the entire context have been returned.
+
+Outputs for a given context will always be in order of the inputs you streamed in. (That is, if you send input A and then input B on a context, you will first receive the chunks corresponding to input A, and then the chunks corresponding to input B.)
+
+## Cancelling Requests
+You may also cancel outgoing requests through the websocket.
+
+To cancel a request, send a JSON message with the following structure:
+
+```json WebSocket Request
+{
+  "context_id": "happy-monkeys-fly",
+  "cancel": true
+}
+```
+
+When you send a cancel request:
+
+1. It will only halt requests that have not begun generating a response yet.
+2. Any currently generating request will continue sending responses until completion.
+
+<Note>
+The `context_id` in the cancel request should match the `context_id` of the request you want to cancel.
+</Note>
+
+
+---
+title: Context Flushing and Flush IDs
+subtitle: Learn about managing multiple transcript generations with context flushing.
+---
+
+## Overview
+
+When using [context IDs with the WebSocket API](/2024-06-10/api-reference/tts/working-with-web-sockets/contexts), all audio chunks for transcripts submitted to a single context share the same context ID. This makes it difficult to determine which audio chunks correspond to specific transcript submissions.
+
+While this behavior works well for streaming audio, some implementations require the ability to map audio chunks back to their originating transcripts.
+
+<Frame caption="Flushing allows you to convert N transcripts into N generators." background="subtle">
+    <img src="file:d6e42e33-eb4a-4037-b620-2b3e70a479e7" alt="context_flushing" />
+</Frame>
+
+## Manual Flushing
+
+Manual flushing creates clear boundaries between transcript submissions within the same context.
+
+### How It Works
+
+Each time you trigger a manual flush, the system increments a `flush_id` counter. This ID is included in corresponding response audio chunk payloads, allowing you to track which transcript generated specific audio chunks.
+
+### Implementation
+
+To trigger a manual flush:
+
+1. Send a request with these parameters:
+   - `continue=True` (indicates you're continuing with the same context)
+   - `flush=True` (triggering the flush operation)
+   - Empty transcript
+   - Same context ID as your previous request
+
+### Example Flow
+
+```
+1. Submit transcript 1 on context 1
+2. Flush context 1
+3. Submit transcript 2 on context 1
+```
+
+In this flow:
+- All audio chunks from transcript 1 will have `flush_id=1`
+- The manual flush increments the ID
+- All audio chunks from transcript 2 will have `flush_id=2`
+
+## Payload Structure
+
+Each audio chunk payload includes a `flush_id` field that serves as a transcript identifier. This ID increments with each manual flush operation, creating a clear boundary between transcript submissions.
+
+## When to Use Manual Flushing
+
+Consider using manual flushing when:
+- You need to associate audio chunks with their originating transcripts
+- Your application architecture expects a one-to-one relationship between transcripts and response streams
+- You're integrating with frameworks that assume each transcript has a corresponding generator
+
+This feature is particularly helpful when using multiple providers, as it aligns the Cartesia API with systems that expect discrete generator responses per transcript.
+
+
+Voices
+List Voices
+GET
+https://api.cartesia.ai/voices/
+GET
+/voices/
+
+TypeScript
+
+import { CartesiaClient } from "@cartesia/cartesia-js";
+const client = new CartesiaClient({ apiKey: "YOUR_API_KEY" });
+await client.voices.list();
+Try it
+200
+Retrieved
+
+{
+  "data": [
+    {
+      "id": "id",
+      "is_owner": true,
+      "is_public": true,
+      "name": "name",
+      "description": "description",
+      "created_at": "2024-01-15T09:30:00Z",
+      "language": "en",
+      "gender": "masculine",
+      "is_starred": true
+    },
+    {
+      "id": "id",
+      "is_owner": true,
+      "is_public": true,
+      "name": "name",
+      "description": "description",
+      "created_at": "2024-01-15T09:30:00Z",
+      "language": "en",
+      "gender": "masculine",
+      "is_starred": true
+    }
+  ],
+  "has_more": true,
+  "next_page": "next_page"
+}
+Headers
+Authorization
+string
+Required
+Bearer authentication of the form Bearer <token>, where token is your auth token.
+
+Cartesia-Version
+"2025-04-16"
+Required
+Query parameters
+limit
+integer
+Optional
+Defaults to 10
+The number of Voices to return per page, ranging between 1 and 100.
+starting_after
+string
+Optional
+A cursor to use in pagination. starting_after is a Voice ID that defines your place in the list. For example, if you make a /voices request and receive 100 objects, ending with voice_abc123, your subsequent call can include starting_after=voice_abc123 to fetch the next page of the list.
+
+ending_before
+string
+Optional
+A cursor to use in pagination. ending_before is a Voice ID that defines your place in the list. For example, if you make a /voices request and receive 100 objects, starting with voice_abc123, your subsequent call can include ending_before=voice_abc123 to fetch the previous page of the list.
+
+is_owner
+boolean
+Optional
+Whether to only return voices owned by the current user.
+is_starred
+boolean
+Optional
+Whether to only return starred voices.
+gender
+enum
+Optional
+The gender presentation of the voices to return.
+Allowed values:
+masculine
+feminine
+gender_neutral
+expand[]
+list of enums
+Optional
+Additional fields to include in the response.
+Allowed values:
+is_starred
+Response
+This endpoint returns an object.
+data
+list of objects
+The paginated list of Voices.
+
+Show 9 properties
+has_more
+boolean
+Whether there are more Voices to fetch (using starting_after=id, where id is the ID of the last Voice in the current response).
+
+next_page
+string or null
+(Deprecated - use the id of the last Voice in the current response instead.) An ID that can be passed as starting_after to get the next page of Voices.
+
+
+Voices
+Clone Voice
+POST
+https://api.cartesia.ai/voices/clone
+POST
+/voices/clone
+
+TypeScript
+
+import { CartesiaClient } from "@cartesia/cartesia-js";
+import * as fs from "fs";
+const client = new CartesiaClient({ apiKey: "YOUR_API_KEY" });
+await client.voices.clone(fs.createReadStream("/path/to/your/file"), {
+    name: "A high-similarity cloned voice",
+    description: "Copied from Cartesia docs",
+    mode: "similarity",
+    language: "en"
+});
+Try it
+200
+Similarity
+
+{
+  "id": "40248dd5-bfe9-48e2-93f7-ea3f9d5c7f72",
+  "user_id": "482aa35e-d86c-42a4-b818-7bdcfe40a858",
+  "is_public": false,
+  "name": "A high-similarity cloned voice",
+  "description": "Copied from Cartesia docs",
+  "created_at": "2024-11-13T07:06:22.476564Z",
+  "language": "en"
+}
+Clone a high similarity voice from an audio clip. Clones are more similar to the source clip, but may reproduce background noise. For these, use an audio clip about 5 seconds long.
+Headers
+Authorization
+string
+Required
+Bearer authentication of the form Bearer <token>, where token is your auth token.
+
+Cartesia-Version
+"2025-04-16"
+Required
+Request
+This endpoint expects a multipart form containing a file.
+clip
+file
+Required
+name
+string
+Required
+The name of the voice.
+description
+string
+Optional
+A description for the voice.
+language
+enum
+Required
+The language of the voice.
+
+Search...
+
+en
+fr
+de
+es
+pt
+zh
+ja
+hi
+it
+ko
+nl
+pl
+ru
+sv
+tr
+enhance
+boolean
+Optional
+Whether to apply AI enhancements to the clip to reduce background noise. This is not recommended unless the source clip is extremely low quality.
+base_voice_id
+string
+Optional
+Optional base voice ID that the cloned voice is derived from.
+Response
+This endpoint returns an object.
+id
+string
+The ID of the voice.
+user_id
+string
+The ID of the user who owns the voice.
+is_public
+boolean
+Whether the voice is publicly accessible.
+name
+string
+The name of the voice.
+description
+string
+The description of the voice.
+created_at
+datetime
+The date and time the voice was created.
+language
+enum
+The language that the given voice should speak the transcript in.
+
+Options: English (en), French (fr), German (de), Spanish (es), Portuguese (pt), Chinese (zh), Japanese (ja), Hindi (hi), Italian (it), Korean (ko), Dutch (nl), Polish (pl), Russian (ru), Swedish (sv), Turkish (tr).
+
+
+Search...
+
+en
+fr
+de
+es
+pt
+zh
+ja
+hi
+it
+ko
+nl
+pl
+ru
+sv
+tr
+
+
+
+Voices
+Delete Voice
+DELETE
+https://api.cartesia.ai/voices/:id
+DELETE
+/voices/:id
+
+TypeScript
+
+import { CartesiaClient } from "@cartesia/cartesia-js";
+const client = new CartesiaClient({ apiKey: "YOUR_API_KEY" });
+await client.voices.delete("id");
+Try it
+Path parameters
+id
+string
+Required
+The ID of the voice.
+Headers
+Authorization
+string
+Required
+Bearer authentication of the form Bearer <token>, where token is your auth token.
+
+Cartesia-Version
+"2025-04-16"
+Required
+
+Voices
+Update Voice
+PATCH
+https://api.cartesia.ai/voices/:id
+PATCH
+/voices/:id
+
+TypeScript
+
+import { CartesiaClient } from "@cartesia/cartesia-js";
+const client = new CartesiaClient({ apiKey: "YOUR_API_KEY" });
+await client.voices.update("id", {
+    name: "name",
+    description: "description"
+});
+Try it
+200
+Update Voice
+
+{
+  "id": "8f7d3c2e-1a2b-3c4d-5e6f-7g8h9i0j1k2l",
+  "is_owner": true,
+  "is_public": false,
+  "name": "Sarah Peninsular Spanish",
+  "description": "Sarah Voice in Peninsular Spanish",
+  "created_at": "2024-03-15T10:30:00.000Z",
+  "language": "es",
+  "gender": "feminine"
+}
+Update the name, description, and gender of a voice. To set the gender back to the default, set the gender to null. If gender is not specified, the gender will not be updated.
+
+Path parameters
+id
+string
+Required
+The ID of the voice.
+Headers
+Authorization
+string
+Required
+Bearer authentication of the form Bearer <token>, where token is your auth token.
+
+Cartesia-Version
+"2025-04-16"
+Required
+Request
+This endpoint expects an object.
+name
+string
+Required
+The name of the voice.
+description
+string
+Required
+The description of the voice.
+gender
+enum
+Optional
+Allowed values:
+masculine
+feminine
+gender_neutral
+Response
+This endpoint returns an object.
+id
+string
+The ID of the voice.
+is_owner
+boolean
+Whether the current user is the owner of the voice.
+is_public
+boolean
+Whether the voice is publicly accessible.
+name
+string
+The name of the voice.
+description
+string
+The description of the voice.
+created_at
+datetime
+The date and time the voice was created.
+language
+enum
+The language that the given voice should speak the transcript in.
+
+Options: English (en), French (fr), German (de), Spanish (es), Portuguese (pt), Chinese (zh), Japanese (ja), Hindi (hi), Italian (it), Korean (ko), Dutch (nl), Polish (pl), Russian (ru), Swedish (sv), Turkish (tr).
+
+
+Search...
+
+en
+fr
+de
+es
+pt
+zh
+ja
+hi
+it
+ko
+nl
+pl
+ru
+sv
+tr
+gender
+enum or null
+The gender of the voice, if specified.
+Allowed values:
+masculine
+feminine
+gender_neutral
+is_starred
+boolean or null
+Whether the current user has starred the voice. Only included when expand includes is_starred.
+
+
+Voices
+Get Voice
+GET
+https://api.cartesia.ai/voices/:id
+GET
+/voices/:id
+
+TypeScript
+
+import { CartesiaClient } from "@cartesia/cartesia-js";
+const client = new CartesiaClient({ apiKey: "YOUR_API_KEY" });
+await client.voices.get("id");
+Try it
+200
+Retrieved
+
+{
+  "id": "id",
+  "is_owner": true,
+  "is_public": true,
+  "name": "name",
+  "description": "description",
+  "created_at": "2024-01-15T09:30:00Z",
+  "language": "en",
+  "gender": "masculine",
+  "is_starred": true
+}
+Path parameters
+id
+string
+Required
+The ID of the voice.
+Headers
+Authorization
+string
+Required
+Bearer authentication of the form Bearer <token>, where token is your auth token.
+
+Cartesia-Version
+"2025-04-16"
+Required
+Response
+This endpoint returns an object.
+id
+string
+The ID of the voice.
+is_owner
+boolean
+Whether the current user is the owner of the voice.
+is_public
+boolean
+Whether the voice is publicly accessible.
+name
+string
+The name of the voice.
+description
+string
+The description of the voice.
+created_at
+datetime
+The date and time the voice was created.
+language
+enum
+The language that the given voice should speak the transcript in.
+
+Options: English (en), French (fr), German (de), Spanish (es), Portuguese (pt), Chinese (zh), Japanese (ja), Hindi (hi), Italian (it), Korean (ko), Dutch (nl), Polish (pl), Russian (ru), Swedish (sv), Turkish (tr).
+
+
+Search...
+
+en
+fr
+de
+es
+pt
+zh
+ja
+hi
+it
+ko
+nl
+pl
+ru
+sv
+tr
+gender
+enum or null
+The gender of the voice, if specified.
+Allowed values:
+masculine
+feminine
+gender_neutral
+is_starred
+boolean or null
+Whether the current user has starred the voice. Only included when expand includes is_starred.
+
+
+Voices
+Localize Voice
+POST
+https://api.cartesia.ai/voices/localize
+POST
+/voices/localize
+
+TypeScript
+
+import { CartesiaClient } from "@cartesia/cartesia-js";
+const client = new CartesiaClient({ apiKey: "YOUR_API_KEY" });
+await client.voices.localize({
+    voiceId: "694f9389-aac1-45b6-b726-9d9369183238",
+    name: "Sarah Peninsular Spanish",
+    description: "Sarah Voice in Peninsular Spanish",
+    language: "es",
+    originalSpeakerGender: "female",
+    dialect: "pe"
+});
+Try it
+200
+Localize Voice
+
+{
+  "id": "8f7d3c2e-1a2b-3c4d-5e6f-7g8h9i0j1k2l",
+  "user_id": "user_id",
+  "is_public": false,
+  "name": "Sarah Peninsular Spanish",
+  "description": "Sarah Voice in Peninsular Spanish",
+  "created_at": "2024-03-15T10:30:00.000Z",
+  "language": "es"
+}
+Create a new voice from an existing voice localized to a new language and dialect.
+Headers
+Authorization
+string
+Required
+Bearer authentication of the form Bearer <token>, where token is your auth token.
+
+Cartesia-Version
+"2025-04-16"
+Required
+Request
+This endpoint expects an object.
+voice_id
+string
+Required
+The ID of the voice to localize.
+name
+string
+Required
+The name of the new localized voice.
+description
+string
+Required
+The description of the new localized voice.
+language
+enum
+Required
+Target language to localize the voice to.
+
+Options: English (en), German (de), Spanish (es), French (fr), Japanese (ja), Portuguese (pt), Chinese (zh), Hindi (hi), Italian (it), Korean (ko), Dutch (nl), Polish (pl), Russian (ru), Swedish (sv), Turkish (tr).
+
+
+Show 15 enum values
+original_speaker_gender
+enum
+Required
+Allowed values:
+male
+female
+dialect
+enum
+Optional
+The dialect to localize to. Only supported for English (en), Spanish (es), Portuguese (pt), and French (fr).
+
+
+Show 4 variants
+Response
+This endpoint returns an object.
+id
+string
+The ID of the voice.
+user_id
+string
+The ID of the user who owns the voice.
+is_public
+boolean
+Whether the voice is publicly accessible.
+name
+string
+The name of the voice.
+description
+string
+The description of the voice.
+created_at
+datetime
+The date and time the voice was created.
+language
+enum
+The language that the given voice should speak the transcript in.
+
+Options: English (en), French (fr), German (de), Spanish (es), Portuguese (pt), Chinese (zh), Japanese (ja), Hindi (hi), Italian (it), Korean (ko), Dutch (nl), Polish (pl), Russian (ru), Swedish (sv), Turkish (tr).
+
+Voice Changer
+Voice Changer (Bytes)
+
+POST
+https://api.cartesia.ai/voice-changer/bytes
+
+MP3
+
+WAV
+
+RAW
+POST
+/voice-changer/bytes
+
+TypeScript
+
+import { CartesiaClient } from "@cartesia/cartesia-js";
+import * as fs from "fs";
+const client = new CartesiaClient({ apiKey: "YOUR_API_KEY" });
+await client.voiceChanger.bytes(fs.createReadStream("/path/to/your/file"), {
+    voiceId: "694f9389-aac1-45b6-b726-9d9369183238",
+    outputFormatContainer: "mp3",
+    outputFormatSampleRate: 44100,
+    outputFormatBitRate: 128000
+});
+Try it
+Takes an audio file of speech, and returns an audio file of speech spoken with the same intonation, but with a different voice. This endpoint is priced at 15 characters per second of input audio.
+Headers
+Authorization
+string
+Required
+Bearer authentication of the form Bearer <token>, where token is your auth token.
+
+Cartesia-Version
+"2025-04-16"
+Required
+Request
+This endpoint expects a multipart form containing a file.
+clip
+file
+Required
+voice[id]
+string
+Required
+output_format[container]
+enum
+Required
+Allowed values:
+raw
+wav
+mp3
+output_format[sample_rate]
+integer
+Required
+output_format[encoding]
+enum
+Optional
+Required for raw and wav containers.
+
+Allowed values:
+pcm_f32le
+pcm_s16le
+pcm_mulaw
+pcm_alaw
+output_format[bit_rate]
+integer
+Optional
+Required for mp3 containers.
+
+Response
+This endpoint returns a file.
+
+
+Voice Changer
+Voice Changer (SSE)
+
+POST
+https://api.cartesia.ai/voice-changer/sse
+
+MP3
+
+WAV
+
+RAW
+POST
+/voice-changer/sse
+
+TypeScript
+
+import { CartesiaClient } from "@cartesia/cartesia-js";
+import * as fs from "fs";
+const client = new CartesiaClient({ apiKey: "YOUR_API_KEY" });
+const response = await client.voiceChanger.sse(fs.createReadStream("/path/to/your/file"), {
+    voiceId: "694f9389-aac1-45b6-b726-9d9369183238",
+    outputFormatContainer: "mp3",
+    outputFormatSampleRate: 44100,
+    outputFormatBitRate: 128000
+});
+for await (const item of response) {
+    console.log(item);
+}
+Try it
+Headers
+Authorization
+string
+Required
+Bearer authentication of the form Bearer <token>, where token is your auth token.
+
+Cartesia-Version
+"2025-04-16"
+Required
+Request
+Takes an audio file of speech, and streams an audio file of speech spoken with the same intonation, but with a different voice. This endpoint is priced at 15 characters per second of input audio.
+clip
+file
+Required
+voice[id]
+string
+Required
+output_format[container]
+enum
+Required
+Allowed values:
+raw
+wav
+mp3
+output_format[sample_rate]
+integer
+Required
+output_format[encoding]
+enum
+Optional
+Required for raw and wav containers.
+
+Allowed values:
+pcm_f32le
+pcm_s16le
+pcm_mulaw
+pcm_alaw
+output_format[bit_rate]
+integer
+Optional
+Required for mp3 containers.
+
+Response
+This endpoint returns a stream of object.
+chunk
+object
+
+Hide 6 properties
+type
+"chunk"
+data
+Base64 string
+done
+boolean
+status_code
+integer
+step_time
+double
+context_id
+string or null
+A unique identifier for the context. You can use any unique identifier, like a UUID or human ID.
+
+Some customers use unique identifiers from their own systems (such as conversation IDs) as context IDs.
+
+OR
+done
+object
+
+Hide 4 properties
+type
+"done"
+done
+boolean
+status_code
+integer
+context_id
+string or null
+A unique identifier for the context. You can use any unique identifier, like a UUID or human ID.
+
+Some customers use unique identifiers from their own systems (such as conversation IDs) as context IDs.
+
+OR
+error
+object
+
+
+
+Auth
+Generate a New Access Token
+POST
+https://api.cartesia.ai/access-token
+POST
+/access-token
+
+TypeScript
+
+import { CartesiaClient } from "@cartesia/cartesia-js";
+const client = new CartesiaClient({ apiKey: "YOUR_API_KEY" });
+await client.auth.accessToken({
+    grants: {
+        tts: true
+    },
+    expiresIn: 60
+});
+Try it
+
+200
+Generate Access Token with TTS and STT Access
+
+{
+  "token": "eyJhbGciOiJIUzI1NiIsImtpZCI6InNzaWRfeU1uQ0NxRUZXTmJ5ZmFqdUFCVWhaTCJ9.eyJncmFudHMiOnsidHRzIjp0cnVlLCJzdHQiOnRydWV9LCJqdGkiOiJMK0dwd1Z1QWpzTUMiLCJpYXQiOjE3NDQ3NDk1NTQsImlzcyI6Imh0dHBzOi8vYXBpLmNhcnRlc2lhLmFpIiwiZXhwIjoxNzQ0NzQ5NjE0fQ.example"
+}
+Generates a new Access Token for the client. These tokens are short-lived and should be used to make requests to the API from authenticated clients.
+
+Headers
+Authorization
+string
+Required
+Bearer authentication of the form Bearer <token>, where token is your auth token.
+
+Cartesia-Version
+"2025-04-16"
+Required
+Request
+This endpoint expects an object.
+grants
+object
+Optional
+The permissions to be granted via the token. Both TTS and STT grants are optional - specify only the capabilities you need.
+
+
+Show 2 properties
+expires_in
+integer
+Optional
+The number of seconds the token will be valid for since the time of generation. The maximum is 1 hour (3600 seconds).
+
+Response
+This endpoint returns an object.
+token
+string
+The generated Access Token.
+
+Datasets
+List
+GET
+https://api.cartesia.ai/datasets/
+GET
+/datasets/
+
+cURL
+
+curl https://api.cartesia.ai/datasets/ \
+     -H "Cartesia-Version: 2025-04-16" \
+     -H "Authorization: Bearer <token>"
+Try it
+200
+Retrieved
+
+{
+  "data": [
+    {
+      "id": "id",
+      "name": "name",
+      "created_at": "created_at",
+      "description": "description"
+    },
+    {
+      "id": "id",
+      "name": "name",
+      "created_at": "created_at",
+      "description": "description"
+    }
+  ],
+  "has_more": true
+}
+Paginated list of datasets
+Headers
+Authorization
+string
+Required
+Bearer authentication of the form Bearer <token>, where token is your auth token.
+
+Cartesia-Version
+"2025-04-16"
+Required
+Query parameters
+limit
+integer
+Optional
+Defaults to 10
+The number of Datasets to return per page, ranging between 1 and 100.
+starting_after
+string
+Optional
+A cursor to use in pagination. starting_after is a Dataset ID that defines your place in the list. For example, if you make a /datasets request and receive 20 objects, ending with dataset_abc123, your subsequent call can include starting_after=dataset_abc123 to fetch the next page of the list.
+
+ending_before
+string
+Optional
+A cursor to use in pagination. ending_before is a Dataset ID that defines your place in the list. For example, if you make a /datasets request and receive 20 objects, starting with dataset_abc123, your subsequent call can include ending_before=dataset_abc123 to fetch the previous page of the list.
+
+Response
+This endpoint returns an object.
+data
+list of objects
+List of dataset objects
+
+Show 4 properties
+has_more
+boolean
+Whether there are more datasets available
+
+
+
+Datasets
+Create
+POST
+https://api.cartesia.ai/datasets/
+POST
+/datasets/
+
+cURL
+
+curl -X POST https://api.cartesia.ai/datasets/ \
+     -H "Cartesia-Version: 2025-04-16" \
+     -H "Authorization: Bearer <token>" \
+     -H "Content-Type: application/json" \
+     -d '{
+  "name": "name",
+  "description": "description"
+}'
+Try it
+200
+Successful
+
+{
+  "id": "id",
+  "name": "name",
+  "created_at": "created_at",
+  "description": "description"
+}
+Create a new dataset
+Headers
+Authorization
+string
+Required
+Bearer authentication of the form Bearer <token>, where token is your auth token.
+
+Cartesia-Version
+"2025-04-16"
+Required
+Request
+This endpoint expects an object.
+name
+string
+Required
+Name for the new dataset
+description
+string
+Required
+Optional description for the dataset
+Response
+This endpoint returns an object.
+id
+string
+Unique identifier for the dataset
+name
+string
+Name of the dataset
+created_at
+string
+Timestamp when the dataset was created
+description
+string
+Optional description of the dataset
+
+
+Datasets
+Get
+GET
+https://api.cartesia.ai/datasets/:id
+GET
+/datasets/:id
+
+cURL
+
+curl https://api.cartesia.ai/datasets/id \
+     -H "Cartesia-Version: 2025-04-16" \
+     -H "Authorization: Bearer <token>"
+Try it
+200
+Retrieved
+
+{
+  "id": "id",
+  "name": "name",
+  "created_at": "created_at",
+  "description": "description"
+}
+Retrieve a specific dataset by ID
+Path parameters
+id
+string
+Required
+ID of the dataset to retrieve
+Headers
+Authorization
+string
+Required
+Bearer authentication of the form Bearer <token>, where token is your auth token.
+
+Cartesia-Version
+"2025-04-16"
+Required
+Response
+This endpoint returns an object.
+id
+string
+Unique identifier for the dataset
+name
+string
+Name of the dataset
+created_at
+string
+Timestamp when the dataset was created
+description
+string
+Optional description of the dataset
+
+
+
+Datasets
+Update
+PATCH
+https://api.cartesia.ai/datasets/:id
+PATCH
+/datasets/:id
+
+cURL
+
+curl -X PATCH https://api.cartesia.ai/datasets/id \
+     -H "Cartesia-Version: 2025-04-16" \
+     -H "Authorization: Bearer <token>" \
+     -H "Content-Type: application/json" \
+     -d '{
+  "name": "name",
+  "description": "description"
+}'
+Try it
+Update an existing dataset
+Path parameters
+id
+string
+Required
+ID of the dataset to update
+Headers
+Authorization
+string
+Required
+Bearer authentication of the form Bearer <token>, where token is your auth token.
+
+Cartesia-Version
+"2025-04-16"
+Required
+Request
+This endpoint expects an object.
+name
+string
+Required
+New name for the dataset
+description
+string
+Required
+New description for the dataset
+
+
+Datasets
+Delete
+DELETE
+https://api.cartesia.ai/datasets/:id
+DELETE
+/datasets/:id
+
+cURL
+
+curl -X DELETE https://api.cartesia.ai/datasets/id \
+     -H "Cartesia-Version: 2025-04-16" \
+     -H "Authorization: Bearer <token>"
+Try it
+Delete a dataset
+Path parameters
+id
+string
+Required
+ID of the dataset to delete
+Headers
+Authorization
+string
+Required
+Bearer authentication of the form Bearer <token>, where token is your auth token.
+
+Cartesia-Version
+"2025-04-16"
+Required
+
+
+Datasets
+List Files
+GET
+https://api.cartesia.ai/datasets/:id/files
+GET
+/datasets/:id/files
+
+cURL
+
+curl https://api.cartesia.ai/datasets/id/files \
+     -H "Cartesia-Version: 2025-04-16" \
+     -H "Authorization: Bearer <token>"
+Try it
+200
+Retrieved
+
+{
+  "data": [
+    {
+      "id": "id",
+      "filename": "filename",
+      "created_at": "created_at",
+      "size": 1
+    },
+    {
+      "id": "id",
+      "filename": "filename",
+      "created_at": "created_at",
+      "size": 1
+    }
+  ],
+  "has_more": true
+}
+Paginated list of files in a dataset
+Path parameters
+id
+string
+Required
+ID of the dataset to list files from
+Headers
+Authorization
+string
+Required
+Bearer authentication of the form Bearer <token>, where token is your auth token.
+
+Cartesia-Version
+"2025-04-16"
+Required
+Query parameters
+limit
+integer
+Optional
+Defaults to 10
+The number of files to return per page, ranging between 1 and 100.
+starting_after
+string
+Optional
+A cursor to use in pagination. starting_after is a file ID that defines your place in the list. For example, if you make a dataset files request and receive 20 objects, ending with file_abc123, your subsequent call can include starting_after=file_abc123 to fetch the next page of the list.
+
+ending_before
+string
+Optional
+A cursor to use in pagination. ending_before is a file ID that defines your place in the list. For example, if you make a dataset files request and receive 20 objects, starting with file_abc123, your subsequent call can include ending_before=file_abc123 to fetch the previous page of the list.
+
+Response
+This endpoint returns an object.
+data
+list of objects
+List of file objects
+
+Show 4 properties
+has_more
+boolean
+Whether there are more files available
+
+
+Datasets
+Upload File
+POST
+https://api.cartesia.ai/datasets/:id/files
+POST
+/datasets/:id/files
+
+cURL
+
+curl -X POST https://api.cartesia.ai/datasets/:id/files \
+     -H "Cartesia-Version: 2025-04-16" \
+     -H "Authorization: Bearer <token>" \
+     -H "Content-Type: multipart/form-data" \
+     -F file=@<filename1> \
+     -F purpose="string"
+Try it
+Upload a new file to a dataset
+Path parameters
+id
+string
+Required
+ID of the dataset to upload to
+Headers
+Authorization
+string
+Required
+Bearer authentication of the form Bearer <token>, where token is your auth token.
+
+Cartesia-Version
+"2025-04-16"
+Required
+Request
+This endpoint expects a multipart form containing a file.
+file
+file
+Required
+purpose
+string
+Required
+Purpose of the file (e.g., fine_tune)
+\
+
+Datasets
+Delete File
+DELETE
+https://api.cartesia.ai/datasets/:id/files/:fileID
+DELETE
+/datasets/:id/files/:fileID
+
+cURL
+
+curl -X DELETE https://api.cartesia.ai/datasets/id/files/fileID \
+     -H "Cartesia-Version: 2025-04-16" \
+     -H "Authorization: Bearer <token>"
+Try it
+Remove a file from a dataset
+Path parameters
+id
+string
+Required
+ID of the dataset containing the file
+fileID
+string
+Required
+ID of the file to remove
+Headers
+Authorization
+string
+Required
+Bearer authentication of the form Bearer <token>, where token is your auth token.
+
+Cartesia-Version
+"2025-04-16"
+Required
+
+
+Fine Tunes
+List
+GET
+https://api.cartesia.ai/fine-tunes/
+GET
+/fine-tunes/
+
+cURL
+
+curl https://api.cartesia.ai/fine-tunes/ \
+     -H "Cartesia-Version: 2025-04-16" \
+     -H "Authorization: Bearer <token>"
+Try it
+200
+Retrieved
+
+{
+  "data": [
+    {
+      "id": "id",
+      "name": "name",
+      "description": "description",
+      "language": "language",
+      "model_id": "model_id",
+      "dataset": "dataset",
+      "status": "created"
+    },
+    {
+      "id": "id",
+      "name": "name",
+      "description": "description",
+      "language": "language",
+      "model_id": "model_id",
+      "dataset": "dataset",
+      "status": "created"
+    }
+  ],
+  "has_more": true
+}
+Paginated list of all fine-tunes for the authenticated user
+
+Headers
+Authorization
+string
+Required
+Bearer authentication of the form Bearer <token>, where token is your auth token.
+
+Cartesia-Version
+"2025-04-16"
+Required
+Query parameters
+limit
+integer
+Optional
+Defaults to 10
+The number of fine-tunes to return per page, ranging between 1 and 100.
+
+starting_after
+string
+Optional
+A cursor to use in pagination. starting_after is a fine-tune ID that defines your place in the list. For example, if you make a /fine-tunes request and receive 20 objects, ending with fine_tune_abc123, your subsequent call can include starting_after=fine_tune_abc123 to fetch the next page of the list.
+
+ending_before
+string
+Optional
+A cursor to use in pagination. ending_before is a fine-tune ID that defines your place in the list. For example, if you make a /fine-tunes request and receive 20 objects, starting with fine_tune_abc123, your subsequent call can include ending_before=fine_tune_abc123 to fetch the previous page of the list.
+
+Response
+This endpoint returns an object.
+data
+list of objects
+List of fine-tune objects
+
+
+Show 7 properties
+has_more
+boolean
+Whether there are more fine-tunes available
+
+
+Fine Tunes
+Create
+POST
+https://api.cartesia.ai/fine-tunes/
+POST
+/fine-tunes/
+
+cURL
+
+curl -X POST https://api.cartesia.ai/fine-tunes/ \
+     -H "Cartesia-Version: 2025-04-16" \
+     -H "Authorization: Bearer <token>" \
+     -H "Content-Type: application/json" \
+     -d '{
+  "name": "name",
+  "description": "description",
+  "language": "language",
+  "model_id": "model_id",
+  "dataset": "dataset"
+}'
+Try it
+200
+Successful
+
+{
+  "id": "id",
+  "name": "name",
+  "description": "description",
+  "language": "language",
+  "model_id": "model_id",
+  "dataset": "dataset",
+  "status": "created"
+}
+Create a new fine-tune
+
+Headers
+Authorization
+string
+Required
+Bearer authentication of the form Bearer <token>, where token is your auth token.
+
+Cartesia-Version
+"2025-04-16"
+Required
+Request
+This endpoint expects an object.
+name
+string
+Required
+Name for the new fine-tune
+
+description
+string
+Required
+Description for the fine-tune
+
+language
+string
+Required
+Language code for the fine-tune
+
+model_id
+string
+Required
+Base model ID to fine-tune from
+
+dataset
+string
+Required
+Dataset ID containing training files
+Response
+This endpoint returns an object.
+id
+string
+Unique identifier for the fine-tune
+
+name
+string
+Name of the fine-tune
+
+description
+string
+Description of the fine-tune
+
+language
+string
+Language code of the fine-tune
+
+model_id
+string
+Base model identifier to fine-tune from
+
+dataset
+string
+ID of the dataset used for fine-tuning
+
+status
+enum
+Current status of the fine-tune
+
+Allowed values:
+created
+training
+completed
+failed
+
+
+Fine Tunes
+Get
+GET
+https://api.cartesia.ai/fine-tunes/:id
+GET
+/fine-tunes/:id
+
+cURL
+
+curl https://api.cartesia.ai/fine-tunes/id \
+     -H "Cartesia-Version: 2025-04-16" \
+     -H "Authorization: Bearer <token>"
+Try it
+200
+Retrieved
+
+{
+  "id": "id",
+  "name": "name",
+  "description": "description",
+  "language": "language",
+  "model_id": "model_id",
+  "dataset": "dataset",
+  "status": "created"
+}
+Retrieve a specific fine-tune by ID
+
+Path parameters
+id
+string
+Required
+ID of the fine-tune to retrieve
+
+Headers
+Authorization
+string
+Required
+Bearer authentication of the form Bearer <token>, where token is your auth token.
+
+Cartesia-Version
+"2025-04-16"
+Required
+Response
+This endpoint returns an object.
+id
+string
+Unique identifier for the fine-tune
+
+name
+string
+Name of the fine-tune
+
+description
+string
+Description of the fine-tune
+
+language
+string
+Language code of the fine-tune
+
+model_id
+string
+Base model identifier to fine-tune from
+
+dataset
+string
+ID of the dataset used for fine-tuning
+
+status
+enum
+Current status of the fine-tune
+
+Allowed values:
+created
+training
+completed
+failed
+
+
+
+Fine Tunes
+Delete
+DELETE
+https://api.cartesia.ai/fine-tunes/:id
+DELETE
+/fine-tunes/:id
+
+cURL
+
+curl -X DELETE https://api.cartesia.ai/fine-tunes/id \
+     -H "Cartesia-Version: 2025-04-16" \
+     -H "Authorization: Bearer <token>"
+Try it
+Delete a fine-tune
+
+Path parameters
+id
+string
+Required
+ID of the fine-tune to delete
+
+Headers
+Authorization
+string
+Required
+Bearer authentication of the form Bearer <token>, where token is your auth token.
+
+Cartesia-Version
+"2025-04-16"
+Required
+
+
+
+Fine Tunes
+List Voices
+GET
+https://api.cartesia.ai/fine-tunes/:id/voices
+GET
+/fine-tunes/:id/voices
+
+cURL
+
+curl https://api.cartesia.ai/fine-tunes/id/voices \
+     -H "Cartesia-Version: 2025-04-16" \
+     -H "Authorization: Bearer <token>"
+Try it
+200
+Retrieved
+
+{
+  "data": [
+    {
+      "id": "id",
+      "is_owner": true,
+      "is_public": true,
+      "name": "name",
+      "description": "description",
+      "created_at": "2024-01-15T09:30:00Z",
+      "language": "en",
+      "gender": "masculine",
+      "is_starred": true
+    },
+    {
+      "id": "id",
+      "is_owner": true,
+      "is_public": true,
+      "name": "name",
+      "description": "description",
+      "created_at": "2024-01-15T09:30:00Z",
+      "language": "en",
+      "gender": "masculine",
+      "is_starred": true
+    }
+  ],
+  "has_more": true
+}
+List all voices created from a fine-tune
+
+Path parameters
+id
+string
+Required
+ID of the fine-tune to list voices from
+
+Headers
+Authorization
+string
+Required
+Bearer authentication of the form Bearer <token>, where token is your auth token.
+
+Cartesia-Version
+"2025-04-16"
+Required
+Query parameters
+limit
+integer
+Optional
+Defaults to 10
+The number of voices to return per page, ranging between 1 and 100.
+starting_after
+string
+Optional
+A cursor to use in pagination. starting_after is a voice ID that defines your place in the list. For example, if you make a fine-tune voices request and receive 20 objects, ending with voice_abc123, your subsequent call can include starting_after=voice_abc123 to fetch the next page of the list.
+
+ending_before
+string
+Optional
+A cursor to use in pagination. ending_before is a voice ID that defines your place in the list. For example, if you make a fine-tune voices request and receive 20 objects, starting with voice_abc123, your subsequent call can include ending_before=voice_abc123 to fetch the previous page of the list.
+
+Response
+This endpoint returns an object.
+data
+list of objects
+List of voice objects
+
+Show 9 properties
+has_more
+boolean
+Whether there are more voices available
+
+
+
+Infill
+Infill (Bytes)
+
+POST
+https://api.cartesia.ai/infill/bytes
+
+MP3
+
+WAV
+POST
+/infill/bytes
+
+TypeScript
+
+import { CartesiaClient } from "@cartesia/cartesia-js";
+import * as fs from "fs";
+const client = new CartesiaClient({ apiKey: "YOUR_API_KEY" });
+await client.infill.bytes(fs.createReadStream("/path/to/your/file"), fs.createReadStream("/path/to/your/file"), {
+    modelId: "sonic-2",
+    language: "en",
+    transcript: "middle segment",
+    voiceId: "694f9389-aac1-45b6-b726-9d9369183238",
+    outputFormatContainer: "mp3",
+    outputFormatSampleRate: 44100,
+    outputFormatBitRate: 128000,
+    voiceExperimentalControlsSpeed: "slowest",
+    voiceExperimentalControlsEmotion: ["surprise:high", "curiosity:high"]
+});
+Try it
+Generate audio that smoothly connects two existing audio segments. This is useful for inserting new speech between existing speech segments while maintaining natural transitions.
+
+The cost is 1 credit per character of the infill text plus a fixed cost of 300 credits.
+
+Infilling is only available on sonic-2 at this time.
+
+At least one of left_audio or right_audio must be provided.
+
+As with all generative models, there’s some inherent variability, but here’s some tips we recommend to get the best results from infill:
+
+Use longer infill transcripts
+This gives the model more flexibility to adapt to the rest of the audio
+Target natural pauses in the audio when deciding where to clip
+This means you don’t need word-level timestamps to be as precise
+Clip right up to the start and end of the audio segment you want infilled, keeping as much silence in the left/right audio segments as possible
+This helps the model generate more natural transitions
+Headers
+Authorization
+string
+Required
+Bearer authentication of the form Bearer <token>, where token is your auth token.
+
+Cartesia-Version
+"2025-04-16"
+Required
+Request
+This endpoint expects a multipart form with multiple files.
+left_audio
+file
+Required
+right_audio
+file
+Required
+model_id
+string
+Required
+The ID of the model to use for generating audio
+language
+string
+Required
+The language of the transcript
+transcript
+string
+Required
+The infill text to generate
+voice_id
+string
+Required
+The ID of the voice to use for generating audio
+output_format[container]
+enum
+Required
+The format of the output audio
+Allowed values:
+raw
+wav
+mp3
+output_format[sample_rate]
+integer
+Required
+The sample rate of the output audio
+output_format[encoding]
+enum
+Optional
+Required for raw and wav containers.
+
+Allowed values:
+pcm_f32le
+pcm_s16le
+pcm_mulaw
+pcm_alaw
+output_format[bit_rate]
+integer
+Optional
+Required for mp3 containers.
+
+Response
+This endpoint returns a file.
+
+
+Pronunciation Dicts
+List
+GET
+https://api.cartesia.ai/pronunciation-dicts/
+GET
+/pronunciation-dicts/
+
+JavaScript
+
+const url = 'https://api.cartesia.ai/pronunciation-dicts/';
+const options = {
+  method: 'GET',
+  headers: {'Cartesia-Version': '2025-04-16', Authorization: 'Bearer <token>'}
+};
+try {
+  const response = await fetch(url, options);
+  const data = await response.json();
+  console.log(data);
+} catch (error) {
+  console.error(error);
+}
+Try it
+200
+Retrieved
+
+{
+  "data": [
+    {
+      "id": "id",
+      "name": "name",
+      "owner_id": "owner_id",
+      "pinned": true,
+      "items": [
+        {
+          "text": "text",
+          "alias": "alias"
+        },
+        {
+          "text": "text",
+          "alias": "alias"
+        }
+      ],
+      "created_at": "created_at"
+    },
+    {
+      "id": "id",
+      "name": "name",
+      "owner_id": "owner_id",
+      "pinned": true,
+      "items": [
+        {
+          "text": "text",
+          "alias": "alias"
+        },
+        {
+          "text": "text",
+          "alias": "alias"
+        }
+      ],
+      "created_at": "created_at"
+    }
+  ],
+  "has_more": true
+}
+List all pronunciation dictionaries for the authenticated user
+Headers
+Authorization
+string
+Required
+Bearer authentication of the form Bearer <token>, where token is your auth token.
+
+Cartesia-Version
+"2025-04-16"
+Required
+Query parameters
+limit
+integer
+Optional
+Defaults to 10
+The number of dictionaries to return per page, ranging between 1 and 100.
+starting_after
+string
+Optional
+A cursor to use in pagination. starting_after is a dictionary ID that defines your place in the list. For example, if you make a request and receive 20 objects, ending with dict_abc123, your subsequent call can include starting_after=dict_abc123 to fetch the next page of the list.
+
+ending_before
+string
+Optional
+A cursor to use in pagination. ending_before is a dictionary ID that defines your place in the list. For example, if you make a request and receive 20 objects, starting with dict_abc123, your subsequent call can include ending_before=dict_abc123 to fetch the previous page of the list.
+
+Response
+This endpoint returns an object.
+data
+list of objects
+List of pronunciation dictionary objects
+
+Show 6 properties
+has_more
+boolean
+Whether there are more dictionaries available
+Was this page helpful?
+Yes
+
+
+
+
+Pronunciation Dicts
+Create
+POST
+https://api.cartesia.ai/pronunciation-dicts/
+POST
+/pronunciation-dicts/
+
+JavaScript
+
+const url = 'https://api.cartesia.ai/pronunciation-dicts/';
+const options = {
+  method: 'POST',
+  headers: {
+    'Cartesia-Version': '2025-04-16',
+    Authorization: 'Bearer <token>',
+    'Content-Type': 'application/json'
+  },
+  body: '{"name":"name"}'
+};
+try {
+  const response = await fetch(url, options);
+  const data = await response.json();
+  console.log(data);
+} catch (error) {
+  console.error(error);
+}
+Try it
+200
+Successful
+
+{
+  "id": "id",
+  "name": "name",
+  "owner_id": "owner_id",
+  "pinned": true,
+  "items": [
+    {
+      "text": "text",
+      "alias": "alias"
+    },
+    {
+      "text": "text",
+      "alias": "alias"
+    }
+  ],
+  "created_at": "created_at"
+}
+Create a new pronunciation dictionary
+Headers
+Authorization
+string
+Required
+Bearer authentication of the form Bearer <token>, where token is your auth token.
+
+Cartesia-Version
+"2025-04-16"
+Required
+Request
+This endpoint expects an object.
+name
+string
+Required
+Name for the new pronunciation dictionary
+items
+list of objects
+Optional
+Optional initial list of pronunciation mappings
+
+Show 2 properties
+Response
+This endpoint returns an object.
+id
+string
+Unique identifier for the pronunciation dictionary
+name
+string
+Name of the pronunciation dictionary
+owner_id
+string
+ID of the user who owns this dictionary
+pinned
+boolean
+Whether this dictionary is pinned for the user
+items
+list of objects
+List of text-to-pronunciation mappings
+
+
+Show 2 properties
+created_at
+string
+ISO 8601 timestamp of when the dictionary was created
+
+
+
+Pronunciation Dicts
+Get
+GET
+https://api.cartesia.ai/pronunciation-dicts/:id
+GET
+/pronunciation-dicts/:id
+
+JavaScript
+
+const url = 'https://api.cartesia.ai/pronunciation-dicts/id';
+const options = {
+  method: 'GET',
+  headers: {'Cartesia-Version': '2025-04-16', Authorization: 'Bearer <token>'}
+};
+try {
+  const response = await fetch(url, options);
+  const data = await response.json();
+  console.log(data);
+} catch (error) {
+  console.error(error);
+}
+Try it
+200
+Retrieved
+
+{
+  "id": "id",
+  "name": "name",
+  "owner_id": "owner_id",
+  "pinned": true,
+  "items": [
+    {
+      "text": "text",
+      "alias": "alias"
+    },
+    {
+      "text": "text",
+      "alias": "alias"
+    }
+  ],
+  "created_at": "created_at"
+}
+Retrieve a specific pronunciation dictionary by ID
+Path parameters
+id
+string
+Required
+ID of the pronunciation dictionary to retrieve
+Headers
+Authorization
+string
+Required
+Bearer authentication of the form Bearer <token>, where token is your auth token.
+
+Cartesia-Version
+"2025-04-16"
+Required
+Response
+This endpoint returns an object.
+id
+string
+Unique identifier for the pronunciation dictionary
+name
+string
+Name of the pronunciation dictionary
+owner_id
+string
+ID of the user who owns this dictionary
+pinned
+boolean
+Whether this dictionary is pinned for the user
+items
+list of objects
+List of text-to-pronunciation mappings
+
+
+Show 2 properties
+created_at
+string
+ISO 8601 timestamp of when the dictionary was created
+
+
+
+Pronunciation Dicts
+Update
+PATCH
+https://api.cartesia.ai/pronunciation-dicts/:id
+PATCH
+/pronunciation-dicts/:id
+
+JavaScript
+
+const url = 'https://api.cartesia.ai/pronunciation-dicts/id';
+const options = {
+  method: 'PATCH',
+  headers: {
+    'Cartesia-Version': '2025-04-16',
+    Authorization: 'Bearer <token>',
+    'Content-Type': 'application/json'
+  },
+  body: '{}'
+};
+try {
+  const response = await fetch(url, options);
+  const data = await response.json();
+  console.log(data);
+} catch (error) {
+  console.error(error);
+}
+Try it
+200
+Updated
+
+{
+  "id": "id",
+  "name": "name",
+  "owner_id": "owner_id",
+  "pinned": true,
+  "items": [
+    {
+      "text": "text",
+      "alias": "alias"
+    },
+    {
+      "text": "text",
+      "alias": "alias"
+    }
+  ],
+  "created_at": "created_at"
+}
+Update a pronunciation dictionary
+Path parameters
+id
+string
+Required
+ID of the pronunciation dictionary to update
+Headers
+Authorization
+string
+Required
+Bearer authentication of the form Bearer <token>, where token is your auth token.
+
+Cartesia-Version
+"2025-04-16"
+Required
+Request
+This endpoint expects an object.
+name
+string
+Optional
+New name for the pronunciation dictionary
+items
+list of objects
+Optional
+Updated list of pronunciation mappings
+
+Show 2 properties
+Response
+This endpoint returns an object.
+id
+string
+Unique identifier for the pronunciation dictionary
+name
+string
+Name of the pronunciation dictionary
+owner_id
+string
+ID of the user who owns this dictionary
+pinned
+boolean
+Whether this dictionary is pinned for the user
+items
+list of objects
+List of text-to-pronunciation mappings
+
+
+Show 2 properties
+created_at
+string
+ISO 8601 timestamp of when the dictionary was created
+
+
+
+Pronunciation Dicts
+Delete
+DELETE
+https://api.cartesia.ai/pronunciation-dicts/:id
+DELETE
+/pronunciation-dicts/:id
+
+JavaScript
+
+const url = 'https://api.cartesia.ai/pronunciation-dicts/id';
+const options = {
+  method: 'DELETE',
+  headers: {'Cartesia-Version': '2025-04-16', Authorization: 'Bearer <token>'}
+};
+try {
+  const response = await fetch(url, options);
+  const data = await response.json();
+  console.log(data);
+} catch (error) {
+  console.error(error);
+}
+Try it
+Delete a pronunciation dictionary
+Path parameters
+id
+string
+Required
+ID of the pronunciation dictionary to delete
+Headers
+Authorization
+string
+Required
+Bearer authentication of the form Bearer <token>, where token is your auth token.
+
+Cartesia-Version
+"2025-04-16"
+Required
+
+
+
+Pronunciation Dicts
+Pin
+POST
+https://api.cartesia.ai/pronunciation-dicts/:id/pin
+POST
+/pronunciation-dicts/:id/pin
+
+JavaScript
+
+const url = 'https://api.cartesia.ai/pronunciation-dicts/id/pin';
+const options = {
+  method: 'POST',
+  headers: {'Cartesia-Version': '2025-04-16', Authorization: 'Bearer <token>'}
+};
+try {
+  const response = await fetch(url, options);
+  const data = await response.json();
+  console.log(data);
+} catch (error) {
+  console.error(error);
+}
+Try it
+Pin a pronunciation dictionary for the authenticated user
+Path parameters
+id
+string
+Required
+ID of the pronunciation dictionary to pin
+Headers
+Authorization
+string
+Required
+Bearer authentication of the form Bearer <token>, where token is your auth token.
+
+Cartesia-Version
+"2025-04-16"
+Required
+
+
+Pronunciation Dicts
+Unpin
+POST
+https://api.cartesia.ai/pronunciation-dicts/:id/unpin
+POST
+/pronunciation-dicts/:id/unpin
+
+JavaScript
+
+const url = 'https://api.cartesia.ai/pronunciation-dicts/id/unpin';
+const options = {
+  method: 'POST',
+  headers: {'Cartesia-Version': '2025-04-16', Authorization: 'Bearer <token>'}
+};
+try {
+  const response = await fetch(url, options);
+  const data = await response.json();
+  console.log(data);
+} catch (error) {
+  console.error(error);
+}
+Try it
+Unpin a pronunciation dictionary for the authenticated user
+Path parameters
+id
+string
+Required
+ID of the pronunciation dictionary to unpin
+Headers
+Authorization
+string
+Required
+Bearer authentication of the form Bearer <token>, where token is your auth token.
+
+Cartesia-Version
+"2025-04-16"
+Required
