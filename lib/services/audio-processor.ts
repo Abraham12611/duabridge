@@ -1,8 +1,7 @@
 /**
  * Audio Processor Service
  *
- * This service handles audio capture from the microphone and audio playback.
- * It's optimized for low-latency processing with Web Audio API.
+ * This service handles microphone input and audio playback using the Web Audio API.
  */
 
 export class AudioProcessor {
@@ -13,29 +12,43 @@ export class AudioProcessor {
   private isProcessing: boolean = false;
 
   constructor() {
-    // Initialize audio context with 16kHz sample rate for AssemblyAI
-    try {
-      this.audioContext = new AudioContext({
+    // Don't create AudioContext in constructor - it will be created on demand
+    // This avoids issues with server-side rendering
+  }
+
+  /**
+   * Initialize the audio context if not already created
+   */
+  async initializeAudioContext(): Promise<AudioContext> {
+    if (!this.audioContext) {
+      // Check if we're in a browser environment
+      if (typeof window === 'undefined' || !window.AudioContext) {
+        throw new Error('AudioContext not available - are you running in a browser?');
+      }
+
+      // Create AudioContext with optimal settings for speech
+      this.audioContext = new window.AudioContext({
         sampleRate: 16000,
         latencyHint: 'interactive'
       });
-    } catch (error) {
-      console.error('Failed to create AudioContext:', error);
+
+      console.log('AudioContext initialized with sample rate:', this.audioContext.sampleRate);
     }
+
+    return this.audioContext;
   }
 
   /**
    * Start capturing audio from the microphone
    *
-   * @param onAudioData - Callback for processed audio data
+   * @param onAudioData - Callback function for audio data
    */
-  async startMicrophoneCapture(onAudioData: (data: ArrayBuffer) => void): Promise<void> {
-    if (!this.audioContext) {
-      this.audioContext = new AudioContext({ sampleRate: 16000 });
-    }
-
+  async startCapture(onAudioData: (data: ArrayBuffer) => void): Promise<void> {
     try {
-      // Request microphone access with optimal settings for STT
+      // Initialize audio context on demand
+      const audioContext = await this.initializeAudioContext();
+
+      // Request microphone access
       this.mediaStream = await navigator.mediaDevices.getUserMedia({
         audio: {
           channelCount: 1,
@@ -45,27 +58,24 @@ export class AudioProcessor {
         }
       });
 
-      // Create audio source from microphone
-      const source = this.audioContext.createMediaStreamSource(this.mediaStream);
+      // Create media stream source
+      const source = audioContext.createMediaStreamSource(this.mediaStream);
 
-      // Load audio worklet for PCM conversion
-      await this.audioContext.audioWorklet.addModule('/audio-processor.js');
+      // Load audio worklet
+      await audioContext.audioWorklet.addModule('/audio-processor.js');
 
       // Create audio worklet node
-      this.audioWorkletNode = new AudioWorkletNode(this.audioContext, 'audio-processor');
+      this.audioWorkletNode = new AudioWorkletNode(audioContext, 'audio-processor');
 
-      // Handle audio data from worklet
+      // Set up message handler for audio data
       this.audioWorkletNode.port.onmessage = (event) => {
         if (event.data.audioData) {
           onAudioData(event.data.audioData);
         }
       };
 
-      // Connect audio processing pipeline
+      // Connect source to worklet
       source.connect(this.audioWorkletNode);
-
-      // Connect to destination for monitoring (optional)
-      // this.audioWorkletNode.connect(this.audioContext.destination);
 
       console.log('Microphone capture started');
     } catch (error) {
@@ -75,35 +85,51 @@ export class AudioProcessor {
   }
 
   /**
-   * Play audio buffer through speakers
-   *
-   * @param audioData - Raw audio data as ArrayBuffer
+   * Stop capturing audio from the microphone
    */
-  async playAudioBuffer(audioData: ArrayBuffer): Promise<void> {
-    if (!this.audioContext) {
-      this.audioContext = new AudioContext();
+  stopCapture(): void {
+    // Stop media stream
+    if (this.mediaStream) {
+      this.mediaStream.getTracks().forEach(track => track.stop());
+      this.mediaStream = null;
     }
 
+    // Disconnect audio worklet
+    if (this.audioWorkletNode) {
+      this.audioWorkletNode.disconnect();
+      this.audioWorkletNode = null;
+    }
+
+    console.log('Microphone capture stopped');
+  }
+
+  /**
+   * Play audio buffer
+   *
+   * @param audioData - Audio data as ArrayBuffer
+   */
+  async playAudioBuffer(audioData: ArrayBuffer): Promise<void> {
     try {
-      // Resume audio context if suspended (browser policy)
-      if (this.audioContext.state === 'suspended') {
-        await this.audioContext.resume();
+      // Initialize audio context on demand
+      const audioContext = await this.initializeAudioContext();
+
+      // Resume context if suspended
+      if (audioContext.state === 'suspended') {
+        await audioContext.resume();
       }
 
       // Decode audio data
-      const audioBuffer = await this.audioContext.decodeAudioData(audioData);
+      const audioBuffer = await audioContext.decodeAudioData(audioData);
 
-      // Create audio source
-      const source = this.audioContext.createBufferSource();
+      // Create buffer source
+      const source = audioContext.createBufferSource();
       source.buffer = audioBuffer;
-
-      // Connect to destination (speakers)
-      source.connect(this.audioContext.destination);
+      source.connect(audioContext.destination);
 
       // Start playback
       source.start();
 
-      // Return a promise that resolves when playback is complete
+      // Return promise that resolves when playback ends
       return new Promise((resolve) => {
         source.onended = () => resolve();
       });
@@ -113,24 +139,22 @@ export class AudioProcessor {
   }
 
   /**
-   * Queue audio for sequential playback
+   * Queue audio data for playback
    *
    * @param audioData - Audio data as Float32Array
    */
   queueAudio(audioData: Float32Array): void {
     this.audioQueue.push(audioData);
-
-    // Start processing queue if not already processing
     if (!this.isProcessing) {
       this.processAudioQueue();
     }
   }
 
   /**
-   * Process audio queue sequentially
+   * Process audio queue
    */
   private async processAudioQueue(): Promise<void> {
-    if (this.audioQueue.length === 0) {
+    if (this.audioQueue.length === 0 || this.isProcessing) {
       this.isProcessing = false;
       return;
     }
@@ -138,35 +162,34 @@ export class AudioProcessor {
     this.isProcessing = true;
 
     try {
-      if (!this.audioContext) {
-        this.audioContext = new AudioContext();
-      }
+      // Initialize audio context on demand
+      const audioContext = await this.initializeAudioContext();
 
-      // Get next audio chunk
+      // Get next audio data
       const audioData = this.audioQueue.shift();
 
       if (audioData) {
-        // Create audio buffer
-        const audioBuffer = this.audioContext.createBuffer(
-          1, // mono
+        // Create buffer
+        const audioBuffer = audioContext.createBuffer(
+          1,
           audioData.length,
-          this.audioContext.sampleRate
+          audioContext.sampleRate
         );
 
         // Fill buffer with data
         audioBuffer.getChannelData(0).set(audioData);
 
         // Create source
-        const source = this.audioContext.createBufferSource();
+        const source = audioContext.createBufferSource();
         source.buffer = audioBuffer;
+        source.connect(audioContext.destination);
 
-        // Connect to destination
-        source.connect(this.audioContext.destination);
-
-        // Play and wait for completion
+        // Start playback
         source.start();
-        await new Promise<void>((resolve) => {
-          source.onended = () => resolve();
+
+        // Wait for playback to end
+        await new Promise(resolve => {
+          source.onended = () => resolve(null);
         });
       }
 
@@ -179,10 +202,10 @@ export class AudioProcessor {
   }
 
   /**
-   * Stop audio capture and processing
+   * Stop audio processing
    */
   stop(): void {
-    // Stop all audio tracks
+    // Stop media stream
     if (this.mediaStream) {
       this.mediaStream.getTracks().forEach(track => track.stop());
       this.mediaStream = null;

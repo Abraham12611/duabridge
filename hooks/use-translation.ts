@@ -7,310 +7,217 @@
  * - Cartesia for text-to-speech
  */
 
-import { useState, useCallback, useRef, useEffect } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { AssemblyAIStreamingService } from '@/lib/services/assemblyai-streaming';
 import { GeminiTranslationService } from '@/lib/services/gemini-translation';
 import { CartesiaTTSService } from '@/lib/services/cartesia-tts';
 import { AudioProcessor } from '@/lib/services/audio-processor';
 
-interface UseTranslationOptions {
-  speakerALanguage: string;
-  speakerBLanguage: string;
-  voiceIdA: string;
-  voiceIdB: string;
+interface TranslationState {
+  isActive: boolean;
+  isLoading: boolean;
+  error: string | null;
+  transcript: string;
+  translation: string;
+  isConnecting: boolean;
 }
 
-interface TranslationServices {
-  assemblyAI: AssemblyAIStreamingService;
-  gemini: GeminiTranslationService;
-  cartesia: CartesiaTTSService;
-  audioProcessor: AudioProcessor;
-}
-
-// Smart buffering configuration
-const TRANSLATION_BUFFER_DELAY = 300; // ms
-const MIN_TRANSLATION_LENGTH = 5; // characters
-const MAX_SILENCE_DURATION = 1500; // ms
-
-export function useTranslation(options: UseTranslationOptions) {
-  // Status states
-  const [isActive, setIsActive] = useState(false);
-  const [isConnecting, setIsConnecting] = useState(false);
-  const [currentSpeaker, setCurrentSpeaker] = useState<'A' | 'B'>('A');
-  const [error, setError] = useState<string | null>(null);
-  const [isPreWarmed, setIsPreWarmed] = useState(false);
-
-  // State for transcripts and translations
-  const [transcriptA, setTranscriptA] = useState('');
-  const [transcriptB, setTranscriptB] = useState('');
-  const [translationA, setTranslationA] = useState('');
-  const [translationB, setTranslationB] = useState('');
-
-  // Service instances
-  const servicesRef = useRef<TranslationServices>({
-    assemblyAI: new AssemblyAIStreamingService(),
-    gemini: new GeminiTranslationService(),
-    cartesia: new CartesiaTTSService(),
-    audioProcessor: new AudioProcessor()
+export const useTranslation = () => {
+  const [state, setState] = useState<TranslationState>({
+    isActive: false,
+    isLoading: false,
+    error: null,
+    transcript: '',
+    translation: '',
+    isConnecting: false,
   });
 
-  // Translation buffering
-  const translationBufferRef = useRef('');
-  const translationTimerRef = useRef<NodeJS.Timeout>();
-  const lastActivityRef = useRef<number>(Date.now());
-  const silenceTimerRef = useRef<NodeJS.Timeout>();
-  const isSpeakingRef = useRef<boolean>(false);
+  // Services
+  const assemblyAIRef = useRef<AssemblyAIStreamingService | null>(null);
+  const geminiRef = useRef<GeminiTranslationService | null>(null);
+  const cartesiaRef = useRef<CartesiaTTSService | null>(null);
+  const audioProcessorRef = useRef<AudioProcessor | null>(null);
 
-  // Pre-warm services when options change
+  // Metrics
+  const [latency, setLatency] = useState<{
+    stt: number;
+    translation: number;
+    tts: number;
+    total: number;
+  }>({
+    stt: 0,
+    translation: 0,
+    tts: 0,
+    total: 0,
+  });
+
+  // Initialize services
   useEffect(() => {
-    // Only pre-warm if we have valid options
-    if (options.voiceIdA && options.voiceIdB) {
-      preWarmServices();
-    }
+    assemblyAIRef.current = new AssemblyAIStreamingService();
+    geminiRef.current = new GeminiTranslationService();
+    cartesiaRef.current = new CartesiaTTSService();
+    audioProcessorRef.current = new AudioProcessor();
 
-    // Cleanup function
+    // Cleanup on unmount
     return () => {
-      if (translationTimerRef.current) {
-        clearTimeout(translationTimerRef.current);
-      }
-
-      if (silenceTimerRef.current) {
-        clearTimeout(silenceTimerRef.current);
-      }
-
-      // Clean up all services
-      servicesRef.current.cartesia.cleanup();
+      assemblyAIRef.current?.disconnect();
+      cartesiaRef.current?.disconnect();
+      audioProcessorRef.current?.stopCapture();
     };
-  }, [options.voiceIdA, options.voiceIdB, options.speakerALanguage, options.speakerBLanguage]);
+  }, []);
 
-  /**
-   * Pre-warm all services to reduce initial latency
-   */
-  const preWarmServices = async () => {
-    if (isPreWarmed) return;
-
+  // Start translation
+  const start = useCallback(async (
+    speakerALang: string,
+    speakerBLang: string,
+    voiceA: string,
+    voiceB: string,
+    isSpeakerA: boolean
+  ) => {
     try {
-      console.log('Pre-warming services...');
+      setState(prev => ({ ...prev, isLoading: true, isConnecting: true, error: null }));
 
-      // Pre-warm services in parallel
-      await Promise.all([
-        servicesRef.current.assemblyAI.preWarm(),
-        servicesRef.current.gemini.preWarm(),
-        servicesRef.current.cartesia.preWarm(options.voiceIdA, options.speakerALanguage),
-        servicesRef.current.cartesia.preWarm(options.voiceIdB, options.speakerBLanguage)
-      ]);
-
-      setIsPreWarmed(true);
-      console.log('Services pre-warmed successfully');
-    } catch (error) {
-      console.warn('Failed to pre-warm services:', error);
-      // Non-critical error, can continue without pre-warming
-    }
-  };
-
-  /**
-   * Handle partial transcript from AssemblyAI
-   */
-  const handlePartialTranscript = useCallback((text: string, speaker: 'A' | 'B') => {
-    // Update transcript state
-    if (speaker === 'A') {
-      setTranscriptA(text);
-    } else {
-      setTranscriptB(text);
-    }
-
-    // Update last activity timestamp
-    lastActivityRef.current = Date.now();
-
-    // Set speaking flag
-    if (text.trim().length > 0) {
-      isSpeakingRef.current = true;
-
-      // Reset silence timer if exists
-      if (silenceTimerRef.current) {
-        clearTimeout(silenceTimerRef.current);
-      }
-    }
-
-    // Buffer partial transcripts for better translation chunks
-    translationBufferRef.current = text;
-
-    // Debounce translation requests
-    clearTimeout(translationTimerRef.current);
-    translationTimerRef.current = setTimeout(() => {
-      const bufferText = translationBufferRef.current;
-
-      // Only translate if buffer has meaningful content
-      if (bufferText.trim().length >= MIN_TRANSLATION_LENGTH) {
-        translateAndSpeak(bufferText, speaker);
-
-        // Start silence detection timer
-        silenceTimerRef.current = setTimeout(() => {
-          if (isSpeakingRef.current) {
-            isSpeakingRef.current = false;
-
-            // Final translation after silence
-            if (translationBufferRef.current.trim().length > 0) {
-              translateAndSpeak(translationBufferRef.current, speaker);
-            }
-          }
-        }, MAX_SILENCE_DURATION);
-      }
-    }, TRANSLATION_BUFFER_DELAY);
-  }, [options]);
-
-  /**
-   * Translate text and convert to speech
-   */
-  const translateAndSpeak = async (text: string, speaker: 'A' | 'B') => {
-    if (!text.trim()) return;
-
-    try {
-      // Determine source/target languages and voice based on speaker
-      const sourceLang = speaker === 'A' ? options.speakerALanguage : options.speakerBLanguage;
-      const targetLang = speaker === 'A' ? options.speakerBLanguage : options.speakerALanguage;
-      const voiceId = speaker === 'A' ? options.voiceIdB : options.voiceIdA;
-
-      // Translate text
-      await servicesRef.current.gemini.translateStream(
-        text,
-        sourceLang,
-        targetLang,
-        async (translation) => {
-          // Update translation state
-          if (speaker === 'A') {
-            setTranslationB(translation);
-          } else {
-            setTranslationA(translation);
-          }
-
-          // Convert to speech if we have a valid translation
-          if (translation.trim()) {
-            await servicesRef.current.cartesia.streamText(translation);
-          }
-        }
-      );
-    } catch (error) {
-      console.error('Translation error:', error);
-      setError('Translation failed. Please try again.');
-    }
-  };
-
-  /**
-   * Start the translation session
-   */
-  const start = async () => {
-    try {
-      setIsConnecting(true);
-      setError(null);
+      const sourceLang = isSpeakerA ? speakerALang : speakerBLang;
+      const targetLang = isSpeakerA ? speakerBLang : speakerALang;
+      const voice = isSpeakerA ? voiceB : voiceA; // Use opposite voice
 
       // Initialize audio processor
-      await servicesRef.current.audioProcessor.startMicrophoneCapture(
-        (audioData) => {
-          servicesRef.current.assemblyAI.sendAudioData(audioData);
+      await audioProcessorRef.current?.initializeAudioContext();
+
+      // Start timestamp for latency measurement
+      let startTime = 0;
+      let sttTime = 0;
+      let translationTime = 0;
+
+      // Handle partial transcripts
+      const handlePartialTranscript = (text: string) => {
+        if (!startTime) startTime = Date.now();
+        sttTime = Date.now() - startTime;
+
+        setState(prev => ({
+          ...prev,
+          transcript: text,
+          isConnecting: false
+        }));
+
+        // Update latency metrics
+        setLatency(prev => ({
+          ...prev,
+          stt: sttTime
+        }));
+
+        // Translate partial transcript
+        if (geminiRef.current && text.trim()) {
+          geminiRef.current.translateStream(text, sourceLang, targetLang)
+            .then(translation => {
+              translationTime = Date.now() - startTime - sttTime;
+
+              setState(prev => ({
+                ...prev,
+                translation
+              }));
+
+              // Update latency metrics
+              setLatency(prev => ({
+                ...prev,
+                translation: translationTime
+              }));
+
+              // Speak translation
+              if (cartesiaRef.current && translation.trim()) {
+                cartesiaRef.current.streamText(translation, voice)
+                  .then(() => {
+                    const ttsTime = Date.now() - startTime - sttTime - translationTime;
+                    const totalTime = Date.now() - startTime;
+
+                    // Update latency metrics
+                    setLatency({
+                      stt: sttTime,
+                      translation: translationTime,
+                      tts: ttsTime,
+                      total: totalTime
+                    });
+                  })
+                  .catch(error => {
+                    console.error('TTS error:', error);
+                  });
+              }
+            })
+            .catch(error => {
+              console.error('Translation error:', error);
+            });
         }
+      };
+
+      // Handle final transcripts
+      const handleFinalTranscript = (text: string) => {
+        // Final transcripts are handled the same way as partial for now
+        handlePartialTranscript(text);
+      };
+
+      // Connect to AssemblyAI
+      await assemblyAIRef.current?.connect(
+        sourceLang,
+        handlePartialTranscript,
+        handleFinalTranscript
       );
 
-      // Connect AssemblyAI with appropriate language
-      await servicesRef.current.assemblyAI.connect(
-        currentSpeaker === 'A' ? options.speakerALanguage : options.speakerBLanguage,
-        (partial) => handlePartialTranscript(partial, currentSpeaker),
-        (final) => handlePartialTranscript(final, currentSpeaker)
-      );
+      // Connect to Cartesia TTS
+      await cartesiaRef.current?.connectWebSocket();
 
-      // Connect Cartesia with appropriate voice and language
-      await servicesRef.current.cartesia.connectWebSocket(
-        currentSpeaker === 'A' ? options.voiceIdB : options.voiceIdA,
-        currentSpeaker === 'A' ? options.speakerBLanguage : options.speakerALanguage,
-        (audioData) => {
-          servicesRef.current.audioProcessor.playAudioBuffer(audioData);
-        }
-      );
+      // Start audio capture
+      await audioProcessorRef.current?.startCapture((audioData) => {
+        assemblyAIRef.current?.sendAudioData(audioData);
+      });
 
-      // Set active state
-      setIsActive(true);
-      setIsConnecting(false);
-
-      // Reset activity tracking
-      lastActivityRef.current = Date.now();
-      isSpeakingRef.current = false;
+      setState(prev => ({
+        ...prev,
+        isActive: true,
+        isLoading: false,
+        transcript: '',
+        translation: ''
+      }));
     } catch (error) {
       console.error('Failed to start translation:', error);
-      setError('Failed to start translation. Please check your microphone and try again.');
-      setIsConnecting(false);
-
-      // Clean up any partial connections
-      stop();
+      setState(prev => ({
+        ...prev,
+        isLoading: false,
+        isConnecting: false,
+        error: `Failed to start translation: ${error instanceof Error ? error.message : 'Unknown error'}`
+      }));
     }
-  };
+  }, []);
 
-  /**
-   * Stop the translation session
-   */
-  const stop = () => {
-    // Disconnect all services
-    servicesRef.current.assemblyAI.disconnect();
-    servicesRef.current.cartesia.disconnect();
-    servicesRef.current.audioProcessor.stop();
+  // Stop translation
+  const stop = useCallback(() => {
+    try {
+      audioProcessorRef.current?.stopCapture();
+      assemblyAIRef.current?.disconnect();
+      cartesiaRef.current?.disconnect();
 
-    // Clear any pending translation timers
-    if (translationTimerRef.current) {
-      clearTimeout(translationTimerRef.current);
+      setState(prev => ({
+        ...prev,
+        isActive: false,
+        transcript: '',
+        translation: ''
+      }));
+
+      // Reset latency metrics
+      setLatency({
+        stt: 0,
+        translation: 0,
+        tts: 0,
+        total: 0
+      });
+    } catch (error) {
+      console.error('Error stopping translation:', error);
     }
-
-    // Clear silence timer
-    if (silenceTimerRef.current) {
-      clearTimeout(silenceTimerRef.current);
-    }
-
-    // Reset active state
-    setIsActive(false);
-    isSpeakingRef.current = false;
-  };
-
-  /**
-   * Switch between speakers
-   */
-  const switchSpeaker = () => {
-    setCurrentSpeaker(current => current === 'A' ? 'B' : 'A');
-
-    // If active, reconnect with new language settings
-    if (isActive) {
-      stop();
-      setTimeout(start, 100);
-    }
-  };
-
-  /**
-   * Clear transcripts and translations
-   */
-  const clearTranscripts = () => {
-    setTranscriptA('');
-    setTranscriptB('');
-    setTranslationA('');
-    setTranslationB('');
-    translationBufferRef.current = '';
-  };
+  }, []);
 
   return {
-    // Status
-    isActive,
-    isConnecting,
-    error,
-    currentSpeaker,
-    isPreWarmed,
-
-    // Transcripts and translations
-    transcriptA,
-    transcriptB,
-    translationA,
-    translationB,
-
-    // Actions
+    ...state,
     start,
     stop,
-    switchSpeaker,
-    clearTranscripts,
-    preWarmServices
+    latency
   };
-}
+};

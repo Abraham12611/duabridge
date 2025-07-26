@@ -1,82 +1,156 @@
 /**
  * Cartesia TTS Service
  *
- * This service handles real-time text-to-speech using Cartesia's WebSocket and SSE APIs.
- * It's optimized for ultra-low latency using Sonic Turbo model.
+ * This service handles text-to-speech conversion using Cartesia's API
  */
 
-interface ConnectionPool {
-  [key: string]: {
-    ws: WebSocket;
-    lastUsed: number;
-    isReady: boolean;
-  };
+import { EventSourceParserStream } from 'eventsource-parser/stream';
+
+interface AudioChunk {
+  type: string;
+  data?: string;
+  done?: boolean;
+  status_code?: number;
+  context_id?: string;
 }
 
 export class CartesiaTTSService {
-  private apiKey: string;
   private ws: WebSocket | null = null;
-  private contextId: string = '';
+  private contextId: string | null = null;
   private audioQueue: ArrayBuffer[] = [];
-  private connectionPool: ConnectionPool = {};
-  private connectionTimeout = 60000; // 60 seconds
-  private reconnectAttempts = 0;
-  private maxReconnectAttempts = 3;
-  private reconnectDelay = 500; // ms
-  private currentLanguage = '';
-  private currentVoiceId = '';
-  private onAudioReadyCallback: ((audioData: ArrayBuffer) => void) | null = null;
-  private connectionCleanupInterval: NodeJS.Timeout | null = null;
+  private isPlaying = false;
+  private audioContext: AudioContext | null = null;
+  private nextStartTime = 0;
+  private baseUrl = 'https://api.cartesia.ai';
+  private version = '2025-04-16';
+  private connectionPool = new Map<string, WebSocket>();
+  private maxPoolSize = 3;
+  private connectionIdleTimeout = 30000; // 30 seconds
+  private connectionTimers = new Map<string, NodeJS.Timeout>();
 
   constructor() {
-    this.apiKey = process.env.NEXT_PUBLIC_CARTESIA_API_KEY || '';
-    this.contextId = crypto.randomUUID();
-
-    // Start connection cleanup interval
-    this.connectionCleanupInterval = setInterval(() => {
-      this.cleanupIdleConnections();
-    }, 30000); // Check every 30 seconds
+    if (typeof window !== 'undefined') {
+      this.audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
+    }
   }
 
   /**
-   * Connect to Cartesia's WebSocket API for lowest latency TTS
-   *
-   * @param voiceId - Cartesia voice ID
-   * @param language - Language code (e.g., 'en', 'es', 'fr')
-   * @param onAudioReady - Callback for audio data
+   * Get access token for WebSocket authentication
    */
-  async connectWebSocket(
-    voiceId: string,
-    language: string,
-    onAudioReady: (audioData: ArrayBuffer) => void
-  ): Promise<void> {
+  private async getAccessToken(): Promise<string> {
     try {
-      // Store callback and current settings
-      this.onAudioReadyCallback = onAudioReady;
-      this.currentLanguage = language;
-      this.currentVoiceId = voiceId;
+      const response = await fetch('/api/cartesia/token', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+      });
 
-      // Generate a connection key
-      const connectionKey = `${voiceId}-${language}`;
-
-      // Check if we already have a connection for this voice/language pair
-      if (this.connectionPool[connectionKey] && this.connectionPool[connectionKey].isReady) {
-        console.log('Reusing existing WebSocket connection');
-        this.ws = this.connectionPool[connectionKey].ws;
-        this.connectionPool[connectionKey].lastUsed = Date.now();
-        return;
+      if (!response.ok) {
+        throw new Error(`Failed to get access token: ${response.status}`);
       }
 
-      // Close existing connection if any
-      if (this.ws) {
-        this.disconnect();
+      const data = await response.json();
+      return data.token;
+    } catch (error) {
+      console.error('Error getting Cartesia access token:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Connect to Cartesia WebSocket for streaming TTS
+   */
+  async connectWebSocket(voiceId?: string, language?: string): Promise<void> {
+    try {
+      // Get access token first
+      const accessToken = await this.getAccessToken();
+
+      // Create connection key for pooling
+      const connectionKey = `${voiceId || 'default'}-${language || 'en'}`;
+
+      // Check if we have an existing connection
+      if (this.connectionPool.has(connectionKey)) {
+        const existingWs = this.connectionPool.get(connectionKey)!;
+        if (existingWs.readyState === WebSocket.OPEN) {
+          console.log('Reusing existing WebSocket connection');
+          this.ws = existingWs;
+
+          // Reset idle timer
+          this.resetConnectionIdleTimer(connectionKey);
+          return;
+        } else {
+          // Remove stale connection
+          this.connectionPool.delete(connectionKey);
+          this.clearConnectionIdleTimer(connectionKey);
+        }
       }
 
-      // Generate a new context ID for this session
-      this.contextId = crypto.randomUUID();
-      this.reconnectAttempts = 0;
+      // Check pool size limit
+      if (this.connectionPool.size >= this.maxPoolSize) {
+        // Close the oldest connection
+        const oldestKey = this.connectionPool.keys().next().value;
+        const oldestWs = this.connectionPool.get(oldestKey)!;
+        oldestWs.close();
+        this.connectionPool.delete(oldestKey);
+        this.clearConnectionIdleTimer(oldestKey);
+      }
 
-      await this.createWebSocketConnection(voiceId, language, connectionKey);
+      const wsUrl = `wss://api.cartesia.ai/tts/websocket?access_token=${accessToken}&cartesia_version=${this.version}`;
+      console.log('Connecting to Cartesia WebSocket...');
+
+      this.ws = new WebSocket(wsUrl);
+      this.contextId = `ctx-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+
+      // Add to connection pool
+      this.connectionPool.set(connectionKey, this.ws);
+      this.resetConnectionIdleTimer(connectionKey);
+
+      return new Promise((resolve, reject) => {
+        if (!this.ws) {
+          reject(new Error('WebSocket not initialized'));
+          return;
+        }
+
+        this.ws.onopen = () => {
+          console.log('Cartesia WebSocket connected');
+          resolve();
+        };
+
+        this.ws.onerror = (error) => {
+          console.error('Cartesia WebSocket error:', error);
+          reject(error);
+        };
+
+        this.ws.onmessage = async (event) => {
+          try {
+            const data = JSON.parse(event.data);
+
+            if (data.type === 'chunk' && data.data) {
+              // Decode base64 audio data
+              const audioData = this.base64ToArrayBuffer(data.data);
+              this.audioQueue.push(audioData);
+
+              // Start playing if not already playing
+              if (!this.isPlaying) {
+                this.playAudioQueue();
+              }
+            } else if (data.type === 'done') {
+              console.log('TTS generation complete');
+            } else if (data.type === 'error') {
+              console.error('TTS error:', data);
+            }
+          } catch (error) {
+            console.error('Error processing TTS message:', error);
+          }
+        };
+
+        this.ws.onclose = () => {
+          console.log('Cartesia WebSocket closed');
+          this.connectionPool.delete(connectionKey);
+          this.clearConnectionIdleTimer(connectionKey);
+        };
+      });
     } catch (error) {
       console.error('Error connecting to Cartesia WebSocket:', error);
       throw error;
@@ -84,387 +158,235 @@ export class CartesiaTTSService {
   }
 
   /**
-   * Create a new WebSocket connection
+   * Reset the idle timer for a connection
    */
-  private async createWebSocketConnection(
-    voiceId: string,
-    language: string,
-    connectionKey: string
-  ): Promise<void> {
-    return new Promise((resolve, reject) => {
-      try {
-        // Connect to Cartesia WebSocket
-        const ws = new WebSocket('wss://api.cartesia.ai/tts/websocket');
-        this.ws = ws;
+  private resetConnectionIdleTimer(connectionKey: string): void {
+    // Clear existing timer
+    this.clearConnectionIdleTimer(connectionKey);
 
-        // Add to connection pool (marked as not ready yet)
-        this.connectionPool[connectionKey] = {
-          ws,
-          lastUsed: Date.now(),
-          isReady: false
-        };
-
-        // Set up connection timeout
-        const connectionTimeout = setTimeout(() => {
-          if (!this.connectionPool[connectionKey]?.isReady) {
-            console.error('WebSocket connection timeout');
-            ws.close();
-            reject(new Error('WebSocket connection timeout'));
-          }
-        }, 10000);
-
-        ws.onopen = () => {
-          console.log('Cartesia WebSocket connected');
-          clearTimeout(connectionTimeout);
-
-          // Send initial configuration
-          if (ws.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify({
-              context_id: this.contextId,
-              model_id: "sonic-turbo",  // Use Sonic Turbo for lowest latency
-              voice: {
-                mode: "id",
-                id: voiceId
-              },
-              language: language,
-              output_format: {
-                container: "raw",
-                encoding: "pcm_f32le",
-                sample_rate: 44100
-              },
-              // Required header for Cartesia API
-              headers: {
-                'X-API-Key': this.apiKey,
-                'Cartesia-Version': '2024-11-13'
-              }
-            }));
-
-            // Mark connection as ready
-            this.connectionPool[connectionKey].isReady = true;
-            resolve();
-          }
-        };
-
-        ws.onmessage = async (event) => {
-          if (event.data instanceof Blob) {
-            try {
-              const arrayBuffer = await event.data.arrayBuffer();
-              // Process audio data
-              if (this.onAudioReadyCallback) {
-                this.onAudioReadyCallback(arrayBuffer);
-              }
-
-              // Update last used timestamp
-              if (this.connectionPool[connectionKey]) {
-                this.connectionPool[connectionKey].lastUsed = Date.now();
-              }
-            } catch (error) {
-              console.error('Error processing audio data:', error);
-            }
-          } else {
-            try {
-              // Handle JSON messages (like errors or status updates)
-              const data = JSON.parse(event.data);
-              if (data.error) {
-                console.error('Cartesia WebSocket error:', data.error);
-              }
-            } catch (error) {
-              console.error('Error parsing WebSocket message:', error);
-            }
-          }
-        };
-
-        ws.onerror = (error) => {
-          console.error('Cartesia WebSocket error:', error);
-          clearTimeout(connectionTimeout);
-
-          // Remove from connection pool
-          delete this.connectionPool[connectionKey];
-
-          reject(error);
-        };
-
-        ws.onclose = (event) => {
-          console.log(`Cartesia WebSocket closed: ${event.code} ${event.reason}`);
-
-          // Remove from connection pool
-          delete this.connectionPool[connectionKey];
-
-          // Try to reconnect if unexpected close
-          if (event.code !== 1000 && event.code !== 1001) {
-            this.handleReconnect(voiceId, language);
-          }
-        };
-      } catch (error) {
-        console.error('Error creating WebSocket connection:', error);
-        reject(error);
+    // Set new timer
+    const timer = setTimeout(() => {
+      const ws = this.connectionPool.get(connectionKey);
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        console.log(`Closing idle connection: ${connectionKey}`);
+        ws.close();
+        this.connectionPool.delete(connectionKey);
       }
-    });
+    }, this.connectionIdleTimeout);
+
+    this.connectionTimers.set(connectionKey, timer);
   }
 
   /**
-   * Handle WebSocket reconnection
+   * Clear the idle timer for a connection
    */
-  private async handleReconnect(voiceId: string, language: string): Promise<void> {
-    if (this.reconnectAttempts >= this.maxReconnectAttempts) {
-      console.error('Max reconnect attempts reached');
-      return;
-    }
-
-    this.reconnectAttempts++;
-    const delay = this.reconnectDelay * Math.pow(2, this.reconnectAttempts - 1);
-
-    console.log(`Reconnecting in ${delay}ms (attempt ${this.reconnectAttempts}/${this.maxReconnectAttempts})`);
-
-    setTimeout(async () => {
-      try {
-        const connectionKey = `${voiceId}-${language}`;
-        await this.createWebSocketConnection(voiceId, language, connectionKey);
-      } catch (error) {
-        console.error('Reconnection failed:', error);
-      }
-    }, delay);
-  }
-
-  /**
-   * Clean up idle connections
-   */
-  private cleanupIdleConnections(): void {
-    const now = Date.now();
-
-    Object.entries(this.connectionPool).forEach(([key, connection]) => {
-      if (now - connection.lastUsed > this.connectionTimeout) {
-        console.log(`Closing idle connection: ${key}`);
-        connection.ws.close();
-        delete this.connectionPool[key];
-      }
-    });
-  }
-
-  /**
-   * Stream text to Cartesia for TTS conversion
-   *
-   * @param text - Text to convert to speech
-   */
-  async streamText(text: string): Promise<void> {
-    if (!text.trim()) return;
-
-    if (this.ws?.readyState === WebSocket.OPEN) {
-      try {
-        this.ws.send(JSON.stringify({
-          transcript: text,
-          continue: true,  // Keep connection open for more text
-          context_id: this.contextId
-        }));
-      } catch (error) {
-        console.error('Error sending text to Cartesia:', error);
-
-        // Try to reconnect
-        if (this.currentVoiceId && this.currentLanguage && this.onAudioReadyCallback) {
-          this.handleReconnect(this.currentVoiceId, this.currentLanguage);
-        }
-      }
-    } else {
-      console.error('WebSocket not connected');
-
-      // Try to reconnect
-      if (this.currentVoiceId && this.currentLanguage && this.onAudioReadyCallback) {
-        await this.connectWebSocket(
-          this.currentVoiceId,
-          this.currentLanguage,
-          this.onAudioReadyCallback
-        );
-
-        // Retry sending text
-        if (this.ws?.readyState === WebSocket.OPEN) {
-          this.streamText(text);
-        }
-      }
+  private clearConnectionIdleTimer(connectionKey: string): void {
+    const timer = this.connectionTimers.get(connectionKey);
+    if (timer) {
+      clearTimeout(timer);
+      this.connectionTimers.delete(connectionKey);
     }
   }
 
   /**
-   * Use SSE endpoint as an alternative to WebSocket
-   *
-   * @param text - Text to convert to speech
-   * @param voiceId - Cartesia voice ID
-   * @param language - Language code (e.g., 'en', 'es', 'fr')
-   * @param onAudioChunk - Callback for audio chunks
+   * Stream text to TTS via WebSocket
    */
-  async useSSEEndpoint(
-    text: string,
-    voiceId: string,
-    language: string,
-    onAudioChunk: (chunk: ArrayBuffer) => void
-  ): Promise<void> {
-    if (!text.trim()) return;
+  async streamText(text: string, voiceId: string, language: string = 'en'): Promise<void> {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+      await this.connectWebSocket(voiceId, language);
+    }
 
+    if (!this.ws) {
+      throw new Error('WebSocket not connected');
+    }
+
+    const message = {
+      model_id: 'sonic-turbo',
+      voice: {
+        mode: 'id',
+        id: voiceId
+      },
+      transcript: text,
+      language: language,
+      context_id: this.contextId,
+      output_format: {
+        container: 'raw',
+        encoding: 'pcm_s16le',
+        sample_rate: 16000
+      },
+      add_timestamps: false,
+      continue: false
+    };
+
+    this.ws.send(JSON.stringify(message));
+  }
+
+  /**
+   * Use SSE endpoint for simpler TTS (alternative to WebSocket)
+   */
+  async useSSEEndpoint(text: string, voiceId: string, language: string = 'en'): Promise<void> {
     try {
-      // Use SSE endpoint for simpler implementation
-      const response = await fetch('https://api.cartesia.ai/tts/sse', {
+      const accessToken = await this.getAccessToken();
+
+      const response = await fetch(`${this.baseUrl}/tts/sse`, {
         method: 'POST',
         headers: {
-          'X-API-Key': this.apiKey,
-          'Cartesia-Version': '2024-11-13',
-          'Content-Type': 'application/json'
+          'Authorization': `Bearer ${accessToken}`,
+          'Cartesia-Version': this.version,
+          'Content-Type': 'application/json',
         },
         body: JSON.stringify({
           model_id: 'sonic-turbo',
-          transcript: text,
           voice: {
             mode: 'id',
             id: voiceId
           },
+          transcript: text,
           language: language,
           output_format: {
             container: 'raw',
             encoding: 'pcm_s16le',
-            sample_rate: 44100
-          },
-          stream: true
+            sample_rate: 16000
+          }
         })
       });
 
       if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`);
+        throw new Error(`SSE request failed: ${response.status}`);
       }
 
-      // Parse SSE stream
-      const reader = response.body?.getReader();
-      const decoder = new TextDecoder();
-
-      if (!reader) {
-        throw new Error('Failed to get reader from response');
-      }
+      const reader = response.body!
+        .pipeThrough(new TextDecoderStream())
+        .pipeThrough(new EventSourceParserStream())
+        .getReader();
 
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
 
-        const chunk = decoder.decode(value);
-        const lines = chunk.split('\n');
+        if (value.data) {
+          try {
+            const chunk: AudioChunk = JSON.parse(value.data);
+            if (chunk.type === 'chunk' && chunk.data) {
+              const audioData = this.base64ToArrayBuffer(chunk.data);
+              this.audioQueue.push(audioData);
 
-        for (const line of lines) {
-          if (line.startsWith('data: ')) {
-            try {
-              const data = JSON.parse(line.slice(6));
-              if (data.audio) {
-                const audioData = Uint8Array.from(atob(data.audio), c => c.charCodeAt(0));
-                onAudioChunk(audioData.buffer);
+              if (!this.isPlaying) {
+                this.playAudioQueue();
               }
-            } catch (error) {
-              console.error('Error parsing SSE data:', error);
             }
+          } catch (error) {
+            console.error('Error parsing SSE chunk:', error);
           }
         }
       }
     } catch (error) {
-      console.error('Error using Cartesia SSE endpoint:', error);
+      console.error('SSE TTS error:', error);
+      throw error;
     }
   }
 
   /**
-   * Pre-warm the TTS service connection
-   * This can reduce cold start latency for the first speech synthesis
+   * Convert base64 to ArrayBuffer
    */
-  async preWarm(voiceId: string, language: string): Promise<void> {
+  private base64ToArrayBuffer(base64: string): ArrayBuffer {
+    const binaryString = atob(base64);
+    const bytes = new Uint8Array(binaryString.length);
+    for (let i = 0; i < binaryString.length; i++) {
+      bytes[i] = binaryString.charCodeAt(i);
+    }
+    return bytes.buffer;
+  }
+
+  /**
+   * Play audio queue
+   */
+  private async playAudioQueue(): Promise<void> {
+    if (!this.audioContext || this.isPlaying || this.audioQueue.length === 0) {
+      return;
+    }
+
+    this.isPlaying = true;
+
+    while (this.audioQueue.length > 0) {
+      const audioData = this.audioQueue.shift()!;
+      await this.playAudioChunk(audioData);
+    }
+
+    this.isPlaying = false;
+  }
+
+  /**
+   * Play a single audio chunk
+   */
+  private async playAudioChunk(audioData: ArrayBuffer): Promise<void> {
+    if (!this.audioContext) return;
+
     try {
-      const connectionKey = `${voiceId}-${language}`;
+      // Convert PCM to audio buffer
+      const audioBuffer = this.audioContext.createBuffer(
+        1, // mono
+        audioData.byteLength / 2, // 16-bit samples
+        16000 // sample rate
+      );
 
-      // Create a WebSocket connection but don't store it in the main ws property
-      const ws = new WebSocket('wss://api.cartesia.ai/tts/websocket');
+      const channelData = audioBuffer.getChannelData(0);
+      const int16Array = new Int16Array(audioData);
 
-      return new Promise((resolve, reject) => {
-        const timeout = setTimeout(() => {
-          ws.close();
-          reject(new Error('Pre-warm connection timeout'));
-        }, 5000);
+      for (let i = 0; i < int16Array.length; i++) {
+        channelData[i] = int16Array[i] / 32768; // Convert to float
+      }
 
-        ws.onopen = () => {
-          ws.send(JSON.stringify({
-            context_id: crypto.randomUUID(),
-            model_id: "sonic-turbo",
-            voice: {
-              mode: "id",
-              id: voiceId
-            },
-            language: language,
-            output_format: {
-              container: "raw",
-              encoding: "pcm_f32le",
-              sample_rate: 44100
-            },
-            headers: {
-              'X-API-Key': this.apiKey,
-              'Cartesia-Version': '2024-11-13'
-            }
-          }));
+      // Create and play source
+      const source = this.audioContext.createBufferSource();
+      source.buffer = audioBuffer;
+      source.connect(this.audioContext.destination);
 
-          // Store in connection pool for potential reuse
-          this.connectionPool[connectionKey] = {
-            ws,
-            lastUsed: Date.now(),
-            isReady: true
-          };
+      const currentTime = this.audioContext.currentTime;
+      const startTime = Math.max(currentTime, this.nextStartTime);
 
-          clearTimeout(timeout);
-          console.log('TTS service pre-warmed');
-          resolve();
-        };
+      source.start(startTime);
+      this.nextStartTime = startTime + audioBuffer.duration;
 
-        ws.onerror = (error) => {
-          clearTimeout(timeout);
-          console.warn('Failed to pre-warm TTS service:', error);
-          ws.close();
-          reject(error);
-        };
+      // Wait for playback to complete
+      await new Promise(resolve => {
+        source.onended = resolve;
       });
     } catch (error) {
-      console.warn('Failed to pre-warm TTS service:', error);
-      // Non-critical error, can continue without pre-warming
+      console.error('Error playing audio chunk:', error);
     }
   }
 
   /**
-   * Disconnect from Cartesia's WebSocket API
+   * Disconnect WebSocket
    */
   disconnect(): void {
-    if (this.ws) {
-      if (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING) {
-        this.ws.close();
+    // Close all connections in the pool
+    this.connectionPool.forEach((ws, key) => {
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.close();
       }
-      this.ws = null;
-    }
+      this.clearConnectionIdleTimer(key);
+    });
 
-    // Don't clear the connection pool here, just set current connection to null
-
-    // Clear audio queue
+    this.connectionPool.clear();
+    this.ws = null;
+    this.contextId = null;
     this.audioQueue = [];
-    this.onAudioReadyCallback = null;
+    this.isPlaying = false;
+    this.nextStartTime = 0;
   }
 
   /**
    * Clean up all resources
    */
   cleanup(): void {
-    // Clear the cleanup interval
-    if (this.connectionCleanupInterval) {
-      clearInterval(this.connectionCleanupInterval);
-      this.connectionCleanupInterval = null;
-    }
-
-    // Close all connections
-    Object.values(this.connectionPool).forEach(connection => {
-      if (connection.ws.readyState === WebSocket.OPEN ||
-          connection.ws.readyState === WebSocket.CONNECTING) {
-        connection.ws.close();
-      }
-    });
-
-    // Clear the connection pool
-    this.connectionPool = {};
-
-    // Disconnect current connection
     this.disconnect();
+
+    // Close audio context
+    if (this.audioContext && this.audioContext.state !== 'closed') {
+      this.audioContext.close();
+      this.audioContext = null;
+    }
   }
 }
