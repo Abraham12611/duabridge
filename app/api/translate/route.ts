@@ -53,11 +53,8 @@ export async function POST(request: Request) {
       generationConfig: {
         temperature: 0.1,
         maxOutputTokens: 256,
-      },
-      // Disable thinking to minimize latency
-      thinkingConfig: {
-        thinkingBudget: 0, // Disable thinking
-      },
+      }
+      // Removed invalid config parameter
     });
 
     // Extract translation from response

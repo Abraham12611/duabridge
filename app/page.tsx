@@ -51,23 +51,49 @@ export default function Home() {
     isActive,
     isConnecting,
     error: translationError,
-    currentSpeaker,
-    transcriptA,
-    transcriptB,
-    translationA,
-    translationB,
+    transcript,
+    translation,
     start,
     stop,
-    switchSpeaker,
-    clearTranscripts,
-    isPreWarmed,
-    preWarmServices
-  } = useTranslation({
-    speakerALanguage: speakerALang,
-    speakerBLanguage: speakerBLang,
-    voiceIdA: voiceA,
-    voiceIdB: voiceB
-  });
+    latency
+  } = useTranslation();
+
+  // Current speaker state (managed locally now)
+  const [currentSpeaker, setCurrentSpeaker] = useState('A');
+
+  // Switch speaker function
+  const switchSpeaker = () => {
+    setCurrentSpeaker(prev => prev === 'A' ? 'B' : 'A');
+    // Call stop and then start with the new speaker
+    stop();
+    // Short delay to ensure everything is cleaned up
+    setTimeout(() => {
+      start(
+        currentSpeaker === 'A' ? speakerBLang : speakerALang,
+        currentSpeaker === 'A' ? speakerALang : speakerBLang,
+        currentSpeaker === 'A' ? voiceB : voiceA,
+        currentSpeaker === 'A' ? voiceA : voiceB,
+        currentSpeaker === 'A'
+      );
+    }, 500);
+  };
+
+  // Transcript and translation state (managed locally now)
+  const [transcriptA, setTranscriptA] = useState('');
+  const [transcriptB, setTranscriptB] = useState('');
+  const [translationA, setTranslationA] = useState('');
+  const [translationB, setTranslationB] = useState('');
+
+  // Update the appropriate transcript/translation based on current speaker
+  useEffect(() => {
+    if (currentSpeaker === 'A') {
+      setTranscriptA(transcript);
+      setTranslationB(translation);
+    } else {
+      setTranscriptB(transcript);
+      setTranslationA(translation);
+    }
+  }, [transcript, translation, currentSpeaker]);
 
   // Load Cartesia voices on component mount
   useEffect(() => {
@@ -152,19 +178,17 @@ export default function Home() {
     }
   }, [translationError]);
 
-  // Pre-warm services when voices are loaded
-  useEffect(() => {
-    if (!isLoading && voiceA && voiceB && !isPreWarmed) {
-      preWarmServices();
-    }
-  }, [isLoading, voiceA, voiceB, isPreWarmed, preWarmServices]);
-
-  // Handle start translation with pre-warming
+  // Handle start translation
   const handleStart = async () => {
-    if (!isPreWarmed) {
-      await preWarmServices();
-    }
-    start();
+    // Reset transcripts when starting
+    setTranscriptA('');
+    setTranscriptB('');
+    setTranslationA('');
+    setTranslationB('');
+
+    // Start with speaker A by default
+    setCurrentSpeaker('A');
+    start(speakerALang, speakerBLang, voiceA, voiceB, true);
   };
 
   // Helper function to get voice name
@@ -288,13 +312,11 @@ export default function Home() {
             </div>
           </div>
 
-          {/* Pre-warming Status */}
+          {/* Services Status */}
           <div className="mt-6 flex items-center justify-center">
-            <div className={`px-4 py-2 rounded-full text-sm flex items-center gap-2 ${
-              isPreWarmed ? 'bg-green-100 text-green-800' : 'bg-yellow-100 text-yellow-800'
-            }`}>
+            <div className="px-4 py-2 rounded-full text-sm flex items-center gap-2 bg-blue-100 text-blue-800">
               <Zap className="w-4 h-4" />
-              {isPreWarmed ? 'Services Ready' : 'Optimizing Services...'}
+              Ready to translate
             </div>
           </div>
         </div>

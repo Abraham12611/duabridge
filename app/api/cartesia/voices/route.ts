@@ -16,7 +16,7 @@ export async function GET() {
     const response = await fetch('https://api.cartesia.ai/voices', {
       headers: {
         'X-API-Key': apiKey,
-        'Cartesia-Version': '2024-11-13'
+        'Cartesia-Version': '2025-04-16'  // Updated to match latest version from docs
       }
     });
 
