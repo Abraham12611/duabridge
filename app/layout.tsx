@@ -4,9 +4,9 @@ import Image from "next/image";
 import logo from "@/app/assets/getautocue_logo_mid.png";
 
 export const metadata: Metadata = {
-  title: "getautocue",
+  title: "LinguaBridge",
   description:
-    "A voice controlled teleprompter in your browser - Powered by AssemblyAI",
+    "Real-time cross-language voice translation with ultra-low latency",
 };
 
 export default function RootLayout({
@@ -18,7 +18,7 @@ export default function RootLayout({
     <html lang="en">
       <body>
         <div className="fixed top-0 left-0 z-50 p-4">
-          <Image src={logo} alt="getautocue logo" className="h-12 w-12" />
+          <div className="font-bold text-xl text-blue-600">LinguaBridge</div>
         </div>
         {children}
       </body>
