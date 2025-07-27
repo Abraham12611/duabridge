@@ -6,6 +6,14 @@ import { Button } from '@/components/ui/button';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Mic, MicOff, ArrowLeftRight, Zap } from 'lucide-react';
 
+// Define voice interface
+interface Voice {
+  id: string;
+  name?: string;
+  voice_name?: string; // Some APIs use this format
+  language?: string;
+}
+
 // Supported languages for translation
 const SUPPORTED_LANGUAGES = [
   { code: 'en', name: 'English' },
@@ -26,7 +34,7 @@ export default function Home() {
   // Language and voice selection states
   const [speakerALang, setSpeakerALang] = useState('en');
   const [speakerBLang, setSpeakerBLang] = useState('es');
-  const [voices, setVoices] = useState<any[]>([]);
+  const [voices, setVoices] = useState<Voice[]>([]);
   const [voiceA, setVoiceA] = useState('');
   const [voiceB, setVoiceB] = useState('');
   const [isLoading, setIsLoading] = useState(true);
@@ -43,23 +51,49 @@ export default function Home() {
     isActive,
     isConnecting,
     error: translationError,
-    currentSpeaker,
-    transcriptA,
-    transcriptB,
-    translationA,
-    translationB,
+    transcript,
+    translation,
     start,
     stop,
-    switchSpeaker,
-    clearTranscripts,
-    isPreWarmed,
-    preWarmServices
-  } = useTranslation({
-    speakerALanguage: speakerALang,
-    speakerBLanguage: speakerBLang,
-    voiceIdA: voiceA,
-    voiceIdB: voiceB
-  });
+    latency
+  } = useTranslation();
+
+  // Current speaker state (managed locally now)
+  const [currentSpeaker, setCurrentSpeaker] = useState('A');
+
+  // Switch speaker function
+  const switchSpeaker = () => {
+    setCurrentSpeaker(prev => prev === 'A' ? 'B' : 'A');
+    // Call stop and then start with the new speaker
+    stop();
+    // Short delay to ensure everything is cleaned up
+    setTimeout(() => {
+      start(
+        currentSpeaker === 'A' ? speakerBLang : speakerALang,
+        currentSpeaker === 'A' ? speakerALang : speakerBLang,
+        currentSpeaker === 'A' ? voiceB : voiceA,
+        currentSpeaker === 'A' ? voiceA : voiceB,
+        currentSpeaker === 'A'
+      );
+    }, 500);
+  };
+
+  // Transcript and translation state (managed locally now)
+  const [transcriptA, setTranscriptA] = useState('');
+  const [transcriptB, setTranscriptB] = useState('');
+  const [translationA, setTranslationA] = useState('');
+  const [translationB, setTranslationB] = useState('');
+
+  // Update the appropriate transcript/translation based on current speaker
+  useEffect(() => {
+    if (currentSpeaker === 'A') {
+      setTranscriptA(transcript);
+      setTranslationB(translation);
+    } else {
+      setTranscriptB(transcript);
+      setTranslationA(translation);
+    }
+  }, [transcript, translation, currentSpeaker]);
 
   // Load Cartesia voices on component mount
   useEffect(() => {
@@ -73,11 +107,24 @@ export default function Home() {
         }
 
         const data = await response.json();
+
+        // Ensure data is an array
+        if (!Array.isArray(data)) {
+          console.error('Expected array of voices but got:', data);
+          setVoices([]);
+          throw new Error('Invalid voice data format');
+        }
+
         setVoices(data);
 
         // Set default voices based on selected languages
-        const englishVoice = data.find((v: any) => v.language === 'en');
-        const spanishVoice = data.find((v: any) => v.language === 'es');
+        // Make sure we're safely accessing the data
+        const englishVoice = data.find((v: Voice) =>
+          v && v.language === 'en' || v.language === 1
+        );
+        const spanishVoice = data.find((v: Voice) =>
+          v && v.language === 'es' || v.language === 2
+        );
 
         if (englishVoice) setVoiceA(englishVoice.id);
         if (spanishVoice) setVoiceB(spanishVoice.id);
@@ -86,6 +133,18 @@ export default function Home() {
       } catch (err) {
         console.error('Error loading voices:', err);
         setError('Failed to load voices. Please try again later.');
+
+        // Set fallback voices
+        const fallbackVoices = [
+          { id: 'default-en', name: 'English (Default)', language: 'en' },
+          { id: 'default-es', name: 'Spanish (Default)', language: 'es' },
+          { id: 'default-fr', name: 'French (Default)', language: 'fr' },
+          { id: 'default-de', name: 'German (Default)', language: 'de' }
+        ];
+        setVoices(fallbackVoices);
+        setVoiceA('default-en');
+        setVoiceB('default-es');
+
         setIsLoading(false);
       }
     };
@@ -95,15 +154,19 @@ export default function Home() {
 
   // Update voice selection when language changes
   useEffect(() => {
-    if (voices.length > 0) {
-      const speakerAVoice = voices.find((v: any) => v.language === speakerALang);
+    if (voices && voices.length > 0) {
+      const speakerAVoice = voices.find((v: Voice) =>
+        v && (v.language === speakerALang || v.language === speakerALang.toString())
+      );
       if (speakerAVoice) setVoiceA(speakerAVoice.id);
     }
   }, [speakerALang, voices]);
 
   useEffect(() => {
-    if (voices.length > 0) {
-      const speakerBVoice = voices.find((v: any) => v.language === speakerBLang);
+    if (voices && voices.length > 0) {
+      const speakerBVoice = voices.find((v: Voice) =>
+        v && (v.language === speakerBLang || v.language === speakerBLang.toString())
+      );
       if (speakerBVoice) setVoiceB(speakerBVoice.id);
     }
   }, [speakerBLang, voices]);
@@ -115,19 +178,33 @@ export default function Home() {
     }
   }, [translationError]);
 
-  // Pre-warm services when voices are loaded
-  useEffect(() => {
-    if (!isLoading && voiceA && voiceB && !isPreWarmed) {
-      preWarmServices();
-    }
-  }, [isLoading, voiceA, voiceB, isPreWarmed, preWarmServices]);
-
-  // Handle start translation with pre-warming
+  // Handle start translation
   const handleStart = async () => {
-    if (!isPreWarmed) {
-      await preWarmServices();
-    }
-    start();
+    // Reset transcripts when starting
+    setTranscriptA('');
+    setTranscriptB('');
+    setTranslationA('');
+    setTranslationB('');
+
+    // Start with speaker A by default
+    setCurrentSpeaker('A');
+    start(speakerALang, speakerBLang, voiceA, voiceB, true);
+  };
+
+  // Helper function to get voice name
+  const getVoiceName = (voiceId: string): string => {
+    if (!voices || voices.length === 0) return voiceId;
+    const voice = voices.find(v => v && v.id === voiceId);
+    return voice ? (voice.name || voice.voice_name || voiceId) : voiceId;
+  };
+
+  // Helper function to filter voices by language
+  const getVoicesByLanguage = (language: string): Voice[] => {
+    if (!voices || !Array.isArray(voices)) return [];
+
+    return voices.filter((v: Voice) =>
+      v && (v.language === language || v.language === language.toString())
+    );
   };
 
   return (
@@ -177,13 +254,11 @@ export default function Home() {
                   <SelectValue placeholder="Select voice" />
                 </SelectTrigger>
                 <SelectContent>
-                  {voices
-                    .filter(v => v.language === speakerALang)
-                    .map(voice => (
-                      <SelectItem key={voice.id} value={voice.id}>
-                        {voice.name}
-                      </SelectItem>
-                    ))}
+                  {getVoicesByLanguage(speakerALang).map((voice: Voice) => (
+                    <SelectItem key={voice.id} value={voice.id}>
+                      {voice.name || voice.voice_name || voice.id}
+                    </SelectItem>
+                  ))}
                 </SelectContent>
               </Select>
             </div>
@@ -227,25 +302,21 @@ export default function Home() {
                   <SelectValue placeholder="Select voice" />
                 </SelectTrigger>
                 <SelectContent>
-                  {voices
-                    .filter(v => v.language === speakerBLang)
-                    .map(voice => (
-                      <SelectItem key={voice.id} value={voice.id}>
-                        {voice.name}
-                      </SelectItem>
-                    ))}
+                  {getVoicesByLanguage(speakerBLang).map((voice: Voice) => (
+                    <SelectItem key={voice.id} value={voice.id}>
+                      {voice.name || voice.voice_name || voice.id}
+                    </SelectItem>
+                  ))}
                 </SelectContent>
               </Select>
             </div>
           </div>
 
-          {/* Pre-warming Status */}
+          {/* Services Status */}
           <div className="mt-6 flex items-center justify-center">
-            <div className={`px-4 py-2 rounded-full text-sm flex items-center gap-2 ${
-              isPreWarmed ? 'bg-green-100 text-green-800' : 'bg-yellow-100 text-yellow-800'
-            }`}>
+            <div className="px-4 py-2 rounded-full text-sm flex items-center gap-2 bg-blue-100 text-blue-800">
               <Zap className="w-4 h-4" />
-              {isPreWarmed ? 'Services Ready' : 'Optimizing Services...'}
+              Ready to translate
             </div>
           </div>
         </div>

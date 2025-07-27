@@ -1,26 +1,21 @@
 /**
  * AssemblyAI Streaming Service
  *
- * This service handles real-time speech-to-text transcription using AssemblyAI's WebSocket API.
- * It supports the Universal model for multilingual transcription.
+ * This service handles real-time speech-to-text transcription using AssemblyAI's WebSocket API
+ * via a local proxy server to avoid CORS and authentication issues.
  */
 
 export class AssemblyAIStreamingService {
   private ws: WebSocket | null = null;
   private sessionId: string | null = null;
-  private reconnectAttempts = 0;
-  private maxReconnectAttempts = 3;
-  private reconnectDelay = 500; // ms
   private currentLanguage = '';
   private onPartialCallback: ((text: string) => void) | null = null;
   private onFinalCallback: ((text: string) => void) | null = null;
-  private isReconnecting = false;
-  private lastToken: string | null = null;
-  private heartbeatInterval: NodeJS.Timeout | null = null;
+  private isClosingIntentionally = false;
   private connectionTimeout: NodeJS.Timeout | null = null;
 
   /**
-   * Connect to AssemblyAI's WebSocket API
+   * Connect to AssemblyAI's WebSocket API via proxy
    *
    * @param language - Language code (e.g., 'en', 'es', 'fr') or 'automatic' for auto-detection
    * @param onPartialTranscript - Callback for partial transcripts
@@ -36,49 +31,57 @@ export class AssemblyAIStreamingService {
       this.onPartialCallback = onPartialTranscript;
       this.onFinalCallback = onFinalTranscript;
       this.currentLanguage = language;
-      this.reconnectAttempts = 0;
+      this.isClosingIntentionally = false;
 
       // Close existing connection if any
       this.disconnect();
 
-      // Get temporary auth token from our API
-      const tokenResponse = await fetch('/api/assemblyai/token', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ language }),
-      });
+      // Connect to local WebSocket proxy
+      await this.createWebSocketConnection();
 
-      if (!tokenResponse.ok) {
-        throw new Error(`Failed to get token: ${tokenResponse.status}`);
-      }
-
-      const { token } = await tokenResponse.json();
-
-      if (!token) {
-        throw new Error('No token received from API');
-      }
-
-      // Store token for reconnection
-      this.lastToken = token;
-
-      // Connect WebSocket with Universal model
-      await this.createWebSocketConnection(token, language);
-
-      // Set up heartbeat to keep connection alive
-      this.setupHeartbeat();
+      console.log('Successfully connected to AssemblyAI proxy');
     } catch (error) {
-      console.error('AssemblyAI connection error:', error);
+      console.error('AssemblyAI connection error:', error instanceof Error ? error.message : 'Unknown error');
       throw error;
     }
   }
 
   /**
-   * Create a new WebSocket connection
+   * Get the proxy server port from the API
    */
-  private async createWebSocketConnection(token: string, language: string): Promise<void> {
-    return new Promise((resolve, reject) => {
+  private async getProxyPort(): Promise<number> {
+    try {
+      // Try to read the port from our Next.js API route
+      if (typeof window !== 'undefined') {
+        try {
+          const response = await fetch('/api/proxy-port', {
+            cache: 'no-store',
+            headers: { 'Cache-Control': 'no-cache' }
+          });
+
+          if (response.ok) {
+            const port = parseInt(await response.text().trim(), 10);
+            if (!isNaN(port)) {
+              console.log(`Using proxy port: ${port}`);
+              return port;
+            }
+          }
+        } catch (e) {
+          console.log('Could not read proxy port from API, using default port 4001');
+        }
+      }
+    } catch (e) {
+      // Ignore errors
+    }
+
+    return 4001; // Default port
+  }
+
+  /**
+   * Create a new WebSocket connection to the proxy server
+   */
+  private async createWebSocketConnection(): Promise<void> {
+    return new Promise(async (resolve, reject) => {
       try {
         // Clear any existing connection timeout
         if (this.connectionTimeout) {
@@ -87,27 +90,28 @@ export class AssemblyAIStreamingService {
 
         // Set connection timeout
         this.connectionTimeout = setTimeout(() => {
+          console.error('WebSocket connection timeout');
           reject(new Error('WebSocket connection timeout'));
-          this.handleReconnect();
+          this.cleanup();
         }, 10000);
 
-        // Connect WebSocket with Universal model
-        this.ws = new WebSocket(
-          `wss://api.assemblyai.com/v2/realtime/ws?sample_rate=16000&token=${token}&language_code=${language}`
-        );
+        // Get the proxy port
+        const port = await this.getProxyPort();
+
+        // Connect to local WebSocket proxy
+        const wsUrl = `ws://localhost:${port}`;
+        console.log(`Connecting to AssemblyAI proxy: ${wsUrl}`);
+
+        this.ws = new WebSocket(wsUrl);
 
         this.ws.onopen = () => {
-          console.log('AssemblyAI WebSocket connected');
+          console.log('AssemblyAI proxy WebSocket connected');
 
           // Clear connection timeout
           if (this.connectionTimeout) {
             clearTimeout(this.connectionTimeout);
             this.connectionTimeout = null;
           }
-
-          // Reset reconnect attempts on successful connection
-          this.reconnectAttempts = 0;
-          this.isReconnecting = false;
 
           resolve();
         };
@@ -116,32 +120,44 @@ export class AssemblyAIStreamingService {
           try {
             const data = JSON.parse(event.data);
 
-            if (data.message_type === 'SessionBegins') {
-              this.sessionId = data.session_id;
-              console.log(`AssemblyAI session started: ${this.sessionId}`);
-            } else if (data.message_type === 'PartialTranscript') {
-              if (this.onPartialCallback) {
-                this.onPartialCallback(data.text || '');
-              }
-            } else if (data.message_type === 'FinalTranscript') {
-              if (this.onFinalCallback) {
-                this.onFinalCallback(data.text || '');
-              }
-            } else if (data.message_type === 'SessionTerminated') {
-              console.log('AssemblyAI session terminated:', data.message || '');
+            // Handle v3 API message types
+            if (data.type === 'Begin') {
+              this.sessionId = data.id;
+              console.log(`AssemblyAI session started: ${this.sessionId}, expires at: ${data.expires_at}`);
+            } else if (data.type === 'Turn') {
+              // Handle Turn message which contains both partial and final transcripts
+              const transcript = data.transcript || '';
+              const isFormatted = data.turn_is_formatted || false;
+              const isEndOfTurn = data.end_of_turn || false;
 
-              // Try to reconnect if session terminated unexpectedly
-              if (!this.isReconnecting) {
-                this.handleReconnect();
+              if (isFormatted || isEndOfTurn) {
+                // This is a final transcript
+                if (this.onFinalCallback) {
+                  this.onFinalCallback(transcript);
+                }
+              } else {
+                // This is a partial transcript
+                if (this.onPartialCallback) {
+                  this.onPartialCallback(transcript);
+                }
               }
+            } else if (data.type === 'Error') {
+              console.error('AssemblyAI WebSocket error message:', data.error || 'Unknown error');
+            } else if (data.type === 'Termination') {
+              console.log('AssemblyAI session terminated:', data.message || '');
+              this.cleanup();
+            } else {
+              console.log('Received message from AssemblyAI:', data);
             }
           } catch (error) {
-            console.error('Error parsing AssemblyAI message:', error);
+            console.error('Error parsing AssemblyAI message:', error instanceof Error ? error.message : 'Unknown error', 'Raw data:', event.data);
           }
         };
 
-        this.ws.onerror = (error) => {
-          console.error('AssemblyAI WebSocket error:', error);
+        this.ws.onerror = (event) => {
+          // Log more detailed error information
+          const errorDetail = event instanceof ErrorEvent ? event.message : 'WebSocket error event';
+          console.error('AssemblyAI WebSocket error:', errorDetail);
 
           // Clear connection timeout
           if (this.connectionTimeout) {
@@ -149,12 +165,7 @@ export class AssemblyAIStreamingService {
             this.connectionTimeout = null;
           }
 
-          reject(error);
-
-          // Try to reconnect
-          if (!this.isReconnecting) {
-            this.handleReconnect();
-          }
+          reject(new Error(`WebSocket error: ${errorDetail}`));
         };
 
         this.ws.onclose = (event) => {
@@ -165,14 +176,9 @@ export class AssemblyAIStreamingService {
             clearTimeout(this.connectionTimeout);
             this.connectionTimeout = null;
           }
-
-          // Try to reconnect if not a normal closure
-          if (event.code !== 1000 && event.code !== 1001 && !this.isReconnecting) {
-            this.handleReconnect();
-          }
         };
       } catch (error) {
-        console.error('Error creating WebSocket connection:', error);
+        console.error('Error creating WebSocket connection:', error instanceof Error ? error.message : 'Unknown error');
 
         // Clear connection timeout
         if (this.connectionTimeout) {
@@ -186,65 +192,6 @@ export class AssemblyAIStreamingService {
   }
 
   /**
-   * Set up heartbeat to keep connection alive
-   */
-  private setupHeartbeat(): void {
-    // Clear any existing heartbeat
-    if (this.heartbeatInterval) {
-      clearInterval(this.heartbeatInterval);
-    }
-
-    // Send heartbeat every 30 seconds
-    this.heartbeatInterval = setInterval(() => {
-      if (this.ws?.readyState === WebSocket.OPEN) {
-        // Send empty message as heartbeat
-        this.ws.send(JSON.stringify({ type: 'heartbeat' }));
-      } else {
-        // Connection lost, try to reconnect
-        if (!this.isReconnecting) {
-          this.handleReconnect();
-        }
-      }
-    }, 30000);
-  }
-
-  /**
-   * Handle WebSocket reconnection
-   */
-  private async handleReconnect(): Promise<void> {
-    if (this.isReconnecting || this.reconnectAttempts >= this.maxReconnectAttempts) {
-      if (this.reconnectAttempts >= this.maxReconnectAttempts) {
-        console.error('Max reconnect attempts reached');
-      }
-      return;
-    }
-
-    this.isReconnecting = true;
-    this.reconnectAttempts++;
-    const delay = this.reconnectDelay * Math.pow(2, this.reconnectAttempts - 1);
-
-    console.log(`Reconnecting to AssemblyAI in ${delay}ms (attempt ${this.reconnectAttempts}/${this.maxReconnectAttempts})`);
-
-    setTimeout(async () => {
-      try {
-        if (this.lastToken) {
-          await this.createWebSocketConnection(this.lastToken, this.currentLanguage);
-        } else {
-          // If we don't have a token, we need to get a new one
-          await this.connect(
-            this.currentLanguage,
-            this.onPartialCallback || (() => {}),
-            this.onFinalCallback || (() => {})
-          );
-        }
-      } catch (error) {
-        console.error('AssemblyAI reconnection failed:', error);
-        this.isReconnecting = false;
-      }
-    }, delay);
-  }
-
-  /**
    * Send audio data to AssemblyAI for transcription
    *
    * @param audioData - Raw audio data as ArrayBuffer
@@ -254,28 +201,19 @@ export class AssemblyAIStreamingService {
       try {
         this.ws.send(audioData);
       } catch (error) {
-        console.error('Error sending audio data:', error);
-
-        // Try to reconnect if send fails
-        if (!this.isReconnecting) {
-          this.handleReconnect();
-        }
+        console.error('Error sending audio data:', error instanceof Error ? error.message : 'Unknown error');
       }
-    } else if (!this.isReconnecting) {
-      console.warn('WebSocket not connected, attempting to reconnect...');
-      this.handleReconnect();
+    } else {
+      console.warn('WebSocket not connected, cannot send audio data');
     }
   }
 
   /**
-   * Disconnect from AssemblyAI's WebSocket API
+   * Clean up resources
    */
-  disconnect(): void {
-    // Clear heartbeat interval
-    if (this.heartbeatInterval) {
-      clearInterval(this.heartbeatInterval);
-      this.heartbeatInterval = null;
-    }
+  private cleanup(): void {
+    // Mark that we're intentionally closing
+    this.isClosingIntentionally = true;
 
     // Clear connection timeout
     if (this.connectionTimeout) {
@@ -285,75 +223,21 @@ export class AssemblyAIStreamingService {
 
     // Close WebSocket connection
     if (this.ws) {
-      if (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING) {
-        this.ws.close();
+      if (this.ws.readyState === WebSocket.OPEN) {
+        this.ws.close(1000, 'Intentional disconnect');
+      } else if (this.ws.readyState === WebSocket.CONNECTING) {
+        this.ws.close(1000);
       }
       this.ws = null;
     }
 
     this.sessionId = null;
-    this.isReconnecting = false;
   }
 
   /**
-   * Pre-warm the connection to reduce initial latency
+   * Disconnect from AssemblyAI's WebSocket API
    */
-  async preWarm(): Promise<void> {
-    try {
-      // Get temporary auth token
-      const tokenResponse = await fetch('/api/assemblyai/token', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ language: 'en' }), // Default to English for pre-warming
-      });
-
-      if (!tokenResponse.ok) {
-        throw new Error(`Failed to get token: ${tokenResponse.status}`);
-      }
-
-      const { token } = await tokenResponse.json();
-
-      if (!token) {
-        throw new Error('No token received from API');
-      }
-
-      // Store token for later use
-      this.lastToken = token;
-
-      // Create a temporary connection
-      const ws = new WebSocket(
-        `wss://api.assemblyai.com/v2/realtime/ws?sample_rate=16000&token=${token}`
-      );
-
-      return new Promise((resolve, reject) => {
-        const timeout = setTimeout(() => {
-          ws.close();
-          reject(new Error('Pre-warm connection timeout'));
-        }, 5000);
-
-        ws.onopen = () => {
-          clearTimeout(timeout);
-          console.log('AssemblyAI service pre-warmed');
-
-          // Close the connection after a short delay
-          setTimeout(() => {
-            ws.close();
-            resolve();
-          }, 1000);
-        };
-
-        ws.onerror = (error) => {
-          clearTimeout(timeout);
-          console.warn('Failed to pre-warm AssemblyAI service:', error);
-          ws.close();
-          reject(error);
-        };
-      });
-    } catch (error) {
-      console.warn('Failed to pre-warm AssemblyAI service:', error);
-      // Non-critical error, can continue without pre-warming
-    }
+  disconnect(): void {
+    this.cleanup();
   }
 }
