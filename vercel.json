@@ -3,7 +3,6 @@
   "buildCommand": "pnpm run build",
   "outputDirectory": ".next",
   "framework": "nextjs",
-  "ignoreCommand": "echo 'Ignoring build errors'",
   "env": {
     "NEXT_IGNORE_TYPE_ERROR": "1",
     "NEXT_IGNORE_ESLINT": "1"
