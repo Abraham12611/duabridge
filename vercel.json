@@ -1,0 +1,36 @@
+{
+  "version": 2,
+  "buildCommand": "pnpm run build",
+  "outputDirectory": ".next",
+  "framework": "nextjs",
+  "ignoreCommand": "echo 'Ignoring build errors'",
+  "env": {
+    "NEXT_IGNORE_TYPE_ERROR": "1",
+    "NEXT_IGNORE_ESLINT": "1"
+  },
+  "functions": {
+    "api/proxy-server.js": {
+      "memory": 1024,
+      "maxDuration": 60
+    }
+  },
+  "rewrites": [
+    {
+      "source": "/api/proxy-ws",
+      "destination": "api/proxy-server.js"
+    }
+  ],
+  "headers": [
+    {
+      "source": "/api/proxy-ws",
+      "headers": [
+        { "key": "Connection", "value": "upgrade" },
+        { "key": "Upgrade", "value": "websocket" }
+      ]
+    }
+  ],
+  "builds": [
+    { "src": "package.json", "use": "@vercel/next" },
+    { "src": "api/proxy-server.js", "use": "@vercel/node" }
+  ]
+}

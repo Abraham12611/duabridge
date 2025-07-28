@@ -36,7 +36,7 @@ export class AssemblyAIStreamingService {
       // Close existing connection if any
       this.disconnect();
 
-      // Connect to local WebSocket proxy
+      // Connect to WebSocket proxy
       await this.createWebSocketConnection();
 
       console.log('Successfully connected to AssemblyAI proxy');
@@ -47,34 +47,26 @@ export class AssemblyAIStreamingService {
   }
 
   /**
-   * Get the proxy server port from the API
+   * Get the WebSocket proxy URL
    */
-  private async getProxyPort(): Promise<number> {
-    try {
-      // Try to read the port from our Next.js API route
-      if (typeof window !== 'undefined') {
-        try {
-          const response = await fetch('/api/proxy-port', {
-            cache: 'no-store',
-            headers: { 'Cache-Control': 'no-cache' }
-          });
+  private getProxyUrl(): string {
+    // Use environment-aware URL determination
+    if (typeof window !== 'undefined') {
+      const isProduction = process.env.NODE_ENV === 'production';
+      const host = window.location.host;
+      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
 
-          if (response.ok) {
-            const port = parseInt(await response.text().trim(), 10);
-            if (!isNaN(port)) {
-              console.log(`Using proxy port: ${port}`);
-              return port;
-            }
-          }
-        } catch (e) {
-          console.log('Could not read proxy port from API, using default port 4001');
-        }
+      if (isProduction) {
+        // In production (Vercel), use the deployed serverless function
+        return `${protocol}//${host}/api/proxy-ws`;
+      } else {
+        // In development, use the local proxy server
+        return `ws://localhost:4001`;
       }
-    } catch (e) {
-      // Ignore errors
     }
 
-    return 4001; // Default port
+    // Default fallback
+    return 'ws://localhost:4001';
   }
 
   /**
@@ -95,11 +87,8 @@ export class AssemblyAIStreamingService {
           this.cleanup();
         }, 10000);
 
-        // Get the proxy port
-        const port = await this.getProxyPort();
-
-        // Connect to local WebSocket proxy
-        const wsUrl = `ws://localhost:${port}`;
+        // Get the proxy URL
+        const wsUrl = this.getProxyUrl();
         console.log(`Connecting to AssemblyAI proxy: ${wsUrl}`);
 
         this.ws = new WebSocket(wsUrl);
