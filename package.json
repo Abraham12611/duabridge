@@ -9,7 +9,9 @@
     "lint": "next lint",
     "start": "next start",
     "knip": "knip",
-    "proxy": "node server.js"
+    "proxy": "node server.js",
+    "vercel-build": "pnpm install --no-frozen-lockfile && next build",
+    "vercel-dev": "concurrently \"npm run proxy\" \"npm run dev\""
   },
   "dependencies": {
     "@google/generative-ai": "^0.21.0",
@@ -35,6 +37,7 @@
     "@types/node": "^22",
     "@types/react": "^19",
     "@types/react-dom": "^19",
+    "concurrently": "^8.2.2",
     "knip": "^5.62.0",
     "postcss": "^8.5",
     "tailwindcss": "^3.4.17",

@@ -1,0 +1,32 @@
+{
+  "version": 2,
+  "installCommand": "pnpm install --no-frozen-lockfile",
+  "buildCommand": "pnpm run build",
+  "outputDirectory": ".next",
+  "framework": "nextjs",
+  "env": {
+    "NEXT_IGNORE_TYPE_ERROR": "1",
+    "NEXT_IGNORE_ESLINT": "1"
+  },
+  "rewrites": [
+    {
+      "source": "/api/proxy-ws",
+      "destination": "api/proxy-server.js"
+    }
+  ],
+  "headers": [
+    {
+      "source": "/api/proxy-ws",
+      "headers": [
+        { "key": "Connection", "value": "upgrade" },
+        { "key": "Upgrade", "value": "websocket" }
+      ]
+    }
+  ],
+  "functions": {
+    "api/proxy-server.js": {
+      "memory": 1024,
+      "maxDuration": 60
+    }
+  }
+}
