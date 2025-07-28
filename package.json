@@ -10,7 +10,7 @@
     "start": "next start",
     "knip": "knip",
     "proxy": "node server.js",
-    "vercel-build": "next build",
+    "vercel-build": "pnpm install --no-frozen-lockfile && next build",
     "vercel-dev": "concurrently \"npm run proxy\" \"npm run dev\""
   },
   "dependencies": {

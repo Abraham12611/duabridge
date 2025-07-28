@@ -1,6 +1,7 @@
 {
   "version": 2,
-  "buildCommand": "pnpm install --no-frozen-lockfile && pnpm run build",
+  "installCommand": "pnpm install --no-frozen-lockfile",
+  "buildCommand": "pnpm run build",
   "outputDirectory": ".next",
   "framework": "nextjs",
   "env": {
@@ -22,8 +23,10 @@
       ]
     }
   ],
-  "builds": [
-    { "src": "package.json", "use": "@vercel/next" },
-    { "src": "api/proxy-server.js", "use": "@vercel/node", "config": { "memory": 1024, "maxDuration": 60 } }
-  ]
+  "functions": {
+    "api/proxy-server.js": {
+      "memory": 1024,
+      "maxDuration": 60
+    }
+  }
 }
